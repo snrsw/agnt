@@ -35,6 +35,10 @@ pub enum AppEvent {
         result: Result<Vec<RuntimeUpdate>, AdapterError>,
     },
     RefreshDone,
+    Previewed {
+        key: SessionKey,
+        result: Result<Option<String>, AdapterError>,
+    },
     Started {
         provider: Provider,
         cwd: PathBuf,
@@ -111,6 +115,9 @@ pub struct App {
     pub refreshing: bool,
     pub cache_saved_at: Option<DateTime<Utc>>,
     pub should_quit: bool,
+    /// Keys a preview has already been requested for, so a slow or empty
+    /// answer is not asked for again on every redraw.
+    preview_requested: BTreeSet<SessionKey>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -148,6 +155,7 @@ impl App {
             refreshing: false,
             cache_saved_at,
             should_quit: false,
+            preview_requested: BTreeSet::new(),
             store,
             cache,
         };
@@ -455,6 +463,18 @@ impl App {
         self.ensure_selection();
     }
 
+    /// The selected session's key, when its short content has not been
+    /// fetched yet. Returns it once per key so drawing never queues repeats.
+    pub fn take_preview_request(&mut self) -> Option<SessionKey> {
+        let key = self.selected.clone()?;
+        let session = self.sessions.get(&key)?;
+        if session.preview.is_some() || self.preview_requested.contains(&key) {
+            return None;
+        }
+        self.preview_requested.insert(key.clone());
+        Some(key)
+    }
+
     pub fn save_cache(&self) -> Result<(), crate::storage::StorageError> {
         let rows: Vec<Session> = self.sessions.values().cloned().collect();
         self.cache.save(&rows)
@@ -689,6 +709,15 @@ impl App {
             }
             AppEvent::Observed { provider, result } => self.apply_updates(provider, result),
             AppEvent::RefreshDone => self.refreshing = false,
+            AppEvent::Previewed { key, result } => {
+                // A failed or unsupported preview leaves the row alone; the
+                // detail pane keeps saying the content was not fetched.
+                if let Ok(Some(text)) = result
+                    && let Some(s) = self.sessions.get_mut(&key)
+                {
+                    s.preview = Some(text);
+                }
+            }
             AppEvent::Started {
                 provider,
                 cwd,
@@ -815,6 +844,16 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
     loop {
         guard.terminal().draw(|f| ui::draw(f, &app))?;
 
+        if let Some(key) = app.take_preview_request()
+            && let Some(adapter) = adapter_for(&adapters, key.provider)
+        {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = adapter.preview(&key, SessionView::EXCERPT_CHARS * 4).await;
+                let _ = tx.send(AppEvent::Previewed { key, result }).await;
+            });
+        }
+
         tokio::select! {
             Some(ev) = in_rx.recv() => {
                 effects.extend(app.handle_event(ev));
@@ -835,27 +874,39 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
             match effect {
                 Effect::Quit => app.should_quit = true,
                 Effect::Refresh => spawn_refresh(&mut app, &adapters, ev_tx.clone()),
-                Effect::Attach(key) | Effect::Resume(key) => {
+                // The effect decides between attach and resume. Re-deriving it
+                // here from the row's state would ignore what the user picked
+                // in the ChooseAction dialog.
+                effect @ (Effect::Attach(_) | Effect::Resume(_)) => {
+                    let (key, attaching) = match effect {
+                        Effect::Attach(key) => (key, true),
+                        Effect::Resume(key) => (key, false),
+                        _ => unreachable!("outer pattern admits only these two"),
+                    };
                     let Some(adapter) = adapter_for(&adapters, key.provider) else {
                         app.mode = Mode::Message(format!("no adapter for {}", key.provider.label()));
                         continue;
                     };
-                    let is_attach = matches!(app.mode, Mode::Normal)
-                        && app.sessions.get(&key).is_some_and(|s| s.runtime.state.is_live());
-                    let plan = if is_attach {
+                    let plan = if attaching {
                         adapter.attach(&key).await
                     } else {
                         adapter.resume(&key).await
                     };
                     match plan {
                         Ok(plan) => {
+                            if !plan.note.is_empty() {
+                                app.mode = Mode::Message(plan.note.clone());
+                            }
                             let status = terminal::handoff(&mut guard, &gate, &plan).await;
                             app.mode = match status {
+                                Ok(s) if s.success() => {
+                                    Mode::Message("Back in the list. Refreshing state.".into())
+                                }
                                 Ok(s) => Mode::Message(format!(
-                                    "{} exited ({s}). Refreshing state.",
+                                    "{} exited with {s}. Refreshing state.",
                                     plan.program.display()
                                 )),
-                                Err(e) => Mode::Message(format!("could not start it: {e}")),
+                                Err(e) => Mode::Message(format!("could not run it: {e}")),
                             };
                             spawn_refresh(&mut app, &adapters, ev_tx.clone());
                         }
