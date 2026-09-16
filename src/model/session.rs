@@ -244,7 +244,7 @@ impl SessionView {
     pub fn preview(&self) -> String {
         match self.session.preview.as_deref().filter(|p| !p.trim().is_empty()) {
             Some(p) => text::sanitize(p),
-            None => "内容未取得".to_string(),
+            None => "no content".to_string(),
         }
     }
 
@@ -340,8 +340,11 @@ mod tests {
         );
         v.session.title = Some("Auth fix".into());
         assert_eq!(v.title(), ("Auth fix".to_string(), TitleSource::Provider));
-        v.meta.title_override = Some("認証処理の修正".into());
-        assert_eq!(v.title(), ("認証処理の修正".to_string(), TitleSource::Override));
+        v.meta.title_override = Some("Fix the auth handler".into());
+        assert_eq!(
+            v.title(),
+            ("Fix the auth handler".to_string(), TitleSource::Override)
+        );
         v.meta.title_override = Some("   ".into());
         assert_eq!(v.title().1, TitleSource::Provider);
     }
@@ -349,7 +352,7 @@ mod tests {
     #[test]
     fn preview_falls_back_to_marker() {
         let mut v = view("a");
-        assert_eq!(v.preview(), "内容未取得");
+        assert_eq!(v.preview(), "no content");
         v.session.preview = Some("x\x1b[0m y".into());
         assert_eq!(v.preview(), "x[0m y");
     }
@@ -393,7 +396,7 @@ mod tests {
     #[test]
     fn query_matches_title_path_and_link_number() {
         let mut v = view("a");
-        v.session.title = Some("READMEの整理".into());
+        v.session.title = Some("Tidy up the README".into());
         v.session.cwd = "/Users/me/src/docs".into();
         v.meta
             .upsert_link(Link::from_url("https://github.com/o/r/pull/123", LinkSource::Manual).unwrap());

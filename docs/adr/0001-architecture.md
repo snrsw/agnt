@@ -1,153 +1,153 @@
-# ADR-0001: agntの基本構成とセッション実行の責任分担
+# ADR-0001: agnt's basic structure and the division of responsibility for running sessions
 
-- 日付: 2026-09-13
-- ステータス: **Proposed**
-- 対象: ローカルのClaude Code／Codexセッションを管理するTUI
-- 関連文書: [design.md](../design.md)
+- Date: 2026-09-13
+- Status: **Proposed**
+- Subject: a TUI that manages local Claude Code and Codex sessions
+- Related document: [design.md](../design.md)
 
-## 1. この記録の位置づけ
+## 1. What this record is
 
-ツール名は **agnt** に確定した。本ADRは、それまでの会話を踏まえたアーキテクチャの提案を記録する。Rust、JSONによる永続化、公式インターフェースの優先利用を採用案とするが、ユーザーが全設計を承認済みという意味ではない。特に実行基盤は実機検証後に確定する。
+The tool's name is settled: **agnt**. This ADR records the architecture proposed on the basis of the conversation so far. Rust, JSON persistence, and a preference for the official interfaces are the proposed choices, but that does not mean the user has approved the whole design. The runtime in particular is settled only after testing on a real machine.
 
-| 項目 | 現時点の位置づけ |
+| Item | Current standing |
 | --- | --- |
-| 名前: agnt | 確定 |
-| Ghosttyから使う小さなTUI | ユーザー要件 |
-| Claude CodeとCodexの統合管理 | ユーザー要件 |
-| Rust、初期版ではSQLiteを使わない | 会話を踏まえた採用提案 |
-| 一覧に戻っても実行を継続 | 設計上の目標 |
-| tmuxを必須依存にしない | 優先して検証する案 |
-| 公式CLI画面への接続・離脱 | Codex側を中心に検証待ち |
-| 管理TUIやGhostty終了後も実行を継続 | 初期版の保証範囲に含めるか未決定 |
+| Name: agnt | Settled |
+| A small TUI used from Ghostty | User requirement |
+| Managing Claude Code and Codex together | User requirement |
+| Rust, no SQLite in the first version | Proposed on the basis of the conversation |
+| Work keeps running after returning to the list | Design goal |
+| tmux is not a required dependency | The option to test first |
+| Attaching to and leaving the official CLI screen | Awaiting testing, mainly on the Codex side |
+| Work keeps running after the managing TUI or Ghostty exits | Undecided whether the first version guarantees this |
 
-## 2. 背景と判断基準
+## 2. Background and decision criteria
 
-Claude Codeのagent viewに近い操作感で、Claude CodeとCodexのセッションを一つの一覧から扱いたい。必要な機能は、内容の把握、状態別の分類、PR／issueの表示、削除、任意の作業ディレクトリでの起動である。
+The goal is to handle Claude Code and Codex sessions from a single list, with an experience close to Claude Code's agent view. The needed features are: seeing what a session is about, sorting by state, showing PRs and issues, deleting, and starting in an arbitrary working directory.
 
-判断基準は以下の順とする。
+The decision criteria, in order:
 
-1. 一覧表示と切り替えが速い。
-2. 設定・依存関係・運用対象を少なくする。
-3. 実行状態を誤って断定しない。
-4. 既存のCLIの認証・権限設定・作業環境を利用する。
-5. 各ツールの仕様変更による影響を局所化する。
+1. Listing and switching are fast.
+2. Settings, dependencies, and the things to operate stay few.
+3. Execution state is never asserted wrongly.
+4. The existing CLIs' authentication, permission settings, and working environment are reused.
+5. The impact of each tool's specification changes stays local.
 
-ブラウザUI、エージェント間の自動オーケストレーション、独自の会話エンジン、worktreeの自動作成は初期版の目的に含めない。
+A browser UI, automatic orchestration between agents, a custom conversation engine, and automatic worktree creation are outside the first version's purpose.
 
-## 3. 採用を提案する構成
+## 3. The proposed structure
 
-### D1. Rustの単一実行ファイルとして配布する
+### D1. Ship as a single Rust executable
 
-CLI解析にclap、一覧表示にRatatuiとcrossterm、非同期I/OにTokio、データ変換にserde／serde_jsonを使う案とする。ライブラリの具体的なバージョンは実装開始時に選定して固定する。
+The proposal is clap for CLI parsing, Ratatui and crossterm for the list, Tokio for async I/O, and serde / serde_json for data conversion. Specific library versions are chosen and pinned when implementation starts.
 
-Rustを選ぶ理由は、単一実行ファイルとしての配布と、プロバイダー・状態・操作の違いを型で表現しやすいことである。Goより必ず高速という前提は置かない。体感性能は外部CLIの起動回数、履歴の読み込み量、ネットワーク待ちに左右される。
+Rust is chosen for single-executable distribution and because providers, states, and operations are easy to express in its type system. No assumption is made that Rust is necessarily faster than Go. Perceived performance depends on how often external CLIs are started, how much history is read, and network waits.
 
-Ratatuiは描画、crosstermは端末制御を担う。これらだけで子CLIの画面を保持・復元できるわけではない。[Ratatui](https://ratatui.rs/)、[crossterm](https://docs.rs/crossterm/latest/crossterm/)、[Tokio](https://docs.rs/tokio/latest/tokio/)
+Ratatui draws and crossterm controls the terminal. Those two alone do not hold or restore a child CLI's screen. [Ratatui](https://ratatui.rs/), [crossterm](https://docs.rs/crossterm/latest/crossterm/), [Tokio](https://docs.rs/tokio/latest/tokio/)
 
-### D2. SQLiteを初期依存にしない
+### D2. Do not make SQLite an initial dependency
 
-手動タイトル、作業の分類、PR／issueとの関連、非表示の記録を、小さなJSONファイルに保存する。実行状態はメモリに置き、必要なら再生成可能な一覧キャッシュを別ファイルに保存する。
+Manual titles, work classification, PR / issue associations, and hidden markers go into a small JSON file. Execution state stays in memory, and a regenerable list cache goes in a separate file if needed.
 
-会話本文はagntの永続データに複製しない。会話の正本は各ツールが持つ。
+Conversation content is never copied into agnt's persistent data. Each tool holds the authoritative copy of its conversations.
 
-JSONの更新は、専用ロックファイルによる排他、ロック取得後の再読込、同一ディレクトリ内の一時ファイルへの書込み、renameの順に行う。renameだけでは同時更新の欠落を防げないため、排他を省略しない。
+A JSON update takes the dedicated lock file, reloads after acquiring the lock, writes to a temporary file in the same directory, then renames. Rename alone does not prevent a lost update under concurrent writes, so the exclusion is not skipped.
 
-SQLiteへの移行は、次のいずれかが実測・実要件として現れた場合に再検討する。
+Moving to SQLite is reconsidered when one of the following appears as a measurement or a real requirement:
 
-- 履歴の全文検索や大量の索引を持つ必要がある。
-- 複数プロセスからの高頻度更新が必要になる。
-- JSON全体の読書きが性能目標を満たさない。
-- メタデータの関係やトランザクションが複雑になる。
+- Full-text search over history, or many indexes, is needed.
+- Frequent updates from several processes are needed.
+- Reading and writing the whole JSON file does not meet the performance targets.
+- Metadata relationships or transactions become complex.
 
-### D3. 各ツールの違いをアダプタで吸収する
+### D3. Absorb the differences between tools in adapters
 
-コアとTUIは共通のSessionモデルを扱う。アダプタは、発見、プレビュー取得、起動、接続、停止、機能検出を担当する。各機能の対応可否は明示し、未対応操作を成功扱いにしない。
+The core and the TUI work with one shared Session model. An adapter handles discovery, preview retrieval, launching, attaching, stopping, and feature detection. Support for each feature is stated explicitly, and an unsupported operation is never reported as success.
 
-Claude Codeの実行状態取得には公式のJSON一覧を優先する。ただし、その一覧が過去の通常セッションすべてを網羅するとは扱わない。背景ジョブIDと会話のUUIDも区別する。[Claude agent view](https://code.claude.com/docs/en/agent-view)
+For Claude Code's execution state, the official JSON list takes priority. That list is not treated as covering every past ordinary session, though. Background job IDs and conversation UUIDs are also kept distinct. [Claude agent view](https://code.claude.com/docs/en/agent-view)
 
-CodexではApp Serverの履歴取得・状態通知を優先する。ただし、あるサーバーが返す状態から、他のプロセスで実行中のセッションの生死を断定しない。APIの対象範囲をSessionの観測情報に残す。[Codex App Server](https://learn.chatgpt.com/docs/app-server)
+For Codex, the App Server's history retrieval and state notifications take priority. The state one server returns is not used to assert whether a session running in another process is alive. The API's coverage is recorded in the Session's observation data.
 
-初期版では動的プラグイン機構を作らず、二つのアダプタを同じバイナリに組み込む。
+The first version builds both adapters into the same binary rather than creating a dynamic plugin mechanism. [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
-### D4. tmuxなしの公式連携を第一候補とし、実行基盤は検証で決める
+### D4. Prefer official integration without tmux; decide the runtime by testing
 
-優先案は、Claudeの背景サービスとローカルのCodex App Serverに実行を任せ、agntを操作・観測のクライアントにする構成である。自作daemonやPTY実装は初期段階で導入しない。
+The preferred option leaves execution to Claude's background service and a local Codex App Server, and makes agnt a client that operates and observes. No custom daemon or PTY implementation is introduced at this stage.
 
-ただし、以下の三つは別の性質として扱う。
+Three things are treated as separate properties, however:
 
-1. 自作TUIの表示を切り替えてもサーバー上の処理が続く。
-2. 公式CLI画面に接続した後、その画面を離れて自作一覧へ戻れる。
-3. agntまたはGhosttyを終了しても処理が続く。
+1. Work on the server continues when the custom TUI's display switches away.
+2. After attaching to the official CLI screen, that screen can be left to return to the custom list.
+3. Work continues after agnt or Ghostty exits.
 
-Claudeの背景セッションは接続・離脱を備える。一方、Codex App Serverへ接続した標準CLIの終了が、実行中のターンや未応答の承認要求にどう作用するかは、本ADRでは未検証とする。会話履歴のresumeは、実行中処理の維持を意味しない。
+Claude's background sessions have attach and detach. What happens to a running turn or an unanswered approval request when a standard CLI attached to the Codex App Server exits is untested as of this ADR. Resuming a conversation's history does not mean a running process was preserved.
 
-最初の技術検証では「新規起動 → 長い処理 → 公式画面に接続 → 一覧へ戻る → 再接続」を両者で試す。Codexではagntの観測接続を維持し、標準CLIの接続終了、保留要求、サーバーの寿命を個別に確認する。
+The first technical test runs "start new → long-running work → attach to the official screen → return to the list → reattach" on both tools. For Codex it keeps agnt's observation connection alive and checks the standard CLI's disconnect, the pending requests, and the server's lifetime separately.
 
-公式連携が要件を満たさない場合は、次の選択肢を比較する。どれかへ暗黙に切り替えず、このADRを更新する。
+If official integration does not meet the requirements, the alternatives below are compared. None is adopted implicitly; this ADR is updated instead.
 
-| 代替案 | 利点 | 負担・制約 |
+| Alternative | Benefit | Cost and constraints |
 | --- | --- | --- |
-| agntがPTYを保持 | 公式CLI画面を維持し、共通キーで切り替えられる | 端末画面の保持、出力の継続読取り、リサイズ、入力処理が必要 |
-| Codex App Server用の会話UIを作る | 実行と表示を分離し、状態を直接扱える | 会話表示、承認、質問への応答まで実装範囲が広がる |
-| tmuxを実行基盤にする | PTYと再接続を既存実装に任せられる | 外部依存が増える。実行状態の取得は別途必要 |
+| agnt owns a PTY | Keeps the official CLI screen and switches with a shared key | Needs screen retention, continuous output reading, resize, and input handling |
+| Build a conversation UI for the Codex App Server | Separates execution from display and handles state directly | Widens the scope to conversation display, approvals, and answering questions |
+| Use tmux as the runtime | Leaves PTYs and reattachment to an existing implementation | Adds an external dependency. Execution state still has to come from elsewhere |
 
-PTY方式で管理TUI終了後も継続させる場合は、PTYの所有者を別プロセスにする必要がある。「単一バイナリ」と「常駐プロセスなし」は同義ではない。
+To keep work running after the managing TUI exits under the PTY approach, the PTY's owner has to be a separate process. "Single binary" and "no resident process" are not the same thing.
 
-### D5. 実行状態と作業の分類を分ける
+### D5. Separate execution state from work classification
 
-実行状態はツールから観測し、作業の分類はユーザーが設定する。応答終了を作業完了に変換しない。観測できない状態はUnknownとし、最後に観測した時刻を表示する。
+Execution state is observed from the tool; work classification is set by the user. The end of a response is not converted into the completion of work. A state that cannot be observed is Unknown, shown with the time it was last observed.
 
-PRのマージやプロセスの正常終了から、ユーザーの作業分類を勝手に変更しない。
+A merged PR or a normally exited process never changes the user's work classification on its own.
 
-### D6. 一覧からの削除、停止、履歴削除を別操作にする
+### D6. Make removal from the list, stopping, and history deletion separate operations
 
-初期版の「削除」はagntの一覧からの非表示とする。tombstoneを保存し、再取得時も非表示を維持する。復元を提供する。
+In the first version, "delete" means hiding from agnt's list. A tombstone is stored so the row stays hidden when data is fetched again. Restore is provided.
 
-実行中のセッションは、削除前に停止するか、実行を続けて非表示にするかを表示して選択させる。非表示だけでプロセスを止めない。
+For a running session, the choice between stopping before deleting and continuing to run while hidden is shown and left to the user. Hiding alone never stops a process.
 
-履歴の完全削除は初期版では提供しない。この意味でユーザー要件の「削除」を満たしてよいかは、受け入れ確認点とする。履歴削除が必要なら、プロバイダー別の削除範囲を確認する独立したADRを作る。
+Full history deletion is not offered in the first version. Whether this satisfies the user requirement to "delete" is an acceptance question. If history deletion is needed, a separate ADR covers each provider's deletion scope.
 
-Claudeのrmにはworktreeへの作用があり、Codexのdeleteは会話履歴を削除する。共通の削除キーから一律に呼び出さない。[Claudeの管理操作](https://code.claude.com/docs/en/agent-view)、[Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+Claude's `rm` affects worktrees, and Codex's `delete` deletes conversation history. A single shared delete key does not call both uniformly. [Claude's management operations](https://code.claude.com/docs/en/agent-view), [Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 
-### D7. 一覧の描画から外部I/Oを分離する
+### D7. Separate external I/O from drawing the list
 
-一覧はメモリまたはキャッシュから先に描画し、プロバイダー情報とGitHub情報を非同期に更新する。GitHub障害やCLIの遅延でキー操作を止めない。
+The list draws from memory or the cache first, then updates provider information and GitHub information asynchronously. A GitHub outage or a slow CLI never blocks a keystroke.
 
-独自のLLM要約は導入しない。タイトルと短い既存プレビューを使い、会話全体の読込みは詳細表示時に限定する。
+No custom LLM summarization is introduced. Titles and short existing previews are used, and reading a whole conversation is limited to the detail view.
 
-## 4. 検討した他の基本構成
+## 4. Other basic structures considered
 
-| 案 | 今回採用しない理由 |
+| Option | Why it is not adopted here |
 | --- | --- |
-| Go＋Bubble Tea | 有力だが、今回はRustを採用案とする。性能上の劣位を理由としない |
-| SQLiteを最初から導入 | 小さなメタデータの永続化に対して現時点では必須でない |
-| 全履歴ファイルを毎回走査 | 起動時間が履歴量に依存し、内部形式の変更にも弱い |
-| 自作daemon＋独自RPC＋PTYを最初から実装 | 接続の維持は解決できるが、初期の保守範囲が広すぎる |
-| 両ツールの独自会話UI | 一覧・切り替えツールの範囲を大きく超える |
-| Ghosttyのタブ操作に直接依存 | 端末固有の連携が必要になる。通常の端末I/Oを優先する |
+| Go + Bubble Tea | A strong option, but Rust is the proposal this time. Not for performance reasons |
+| SQLite from the start | Not required at this point for persisting a small amount of metadata |
+| Scan every history file each time | Startup time would depend on history volume, and it is fragile against internal format changes |
+| Custom daemon + custom RPC + PTY from the start | It does solve keeping connections alive, but the initial maintenance scope is too wide |
+| Custom conversation UIs for both tools | Far beyond the scope of a listing and switching tool |
+| Depend directly on Ghostty's tab operations | Would need terminal-specific integration. Ordinary terminal I/O comes first |
 
-## 5. 帰結
+## 5. Consequences
 
-### 得られるもの
+### What this gains
 
-- 小さな配布物と少ない永続データで始められる。
-- 一覧表示がネットワークや履歴全文の読込みを待たない。
-- 各ツールの内部ファイル形式への依存を抑えられる。
-- ユーザーの分類やリンクと、観測データの責任が明確になる。
+- A small distributable and little persistent data to start with.
+- List rendering that does not wait on the network or on reading full history.
+- Reduced dependence on each tool's internal file formats.
+- Clear ownership between the user's classifications and links and the observed data.
 
-### 引き受けるもの
+### What this accepts
 
-- ClaudeとCodexで接続操作や観測可能な範囲が異なる。
-- 外部で起動したセッションには状態や接続の制限があり得る。
-- JSONにも排他・破損対策・スキーマ管理が必要になる。
-- 公式CLI画面との往復が成立するまで、実行基盤の最終形は決められない。
+- Attach operations and observable scope differ between Claude and Codex.
+- Sessions started outside agnt may have limits on state and attachment.
+- JSON also needs exclusion, corruption handling, and schema management.
+- The final runtime cannot be decided until the round trip to the official CLI screen works.
 
-## 6. Acceptedへ進める条件
+## 6. Conditions for moving to Accepted
 
-1. デザインドックのP0検証を実施し、CLIバージョン・OS・結果を記録する。
-2. 実行基盤と、管理TUI終了時の挙動を確定する。
-3. 過去の通常セッションを含む発見範囲を確定する。
-4. 「削除＝一覧から非表示」という初期仕様を確認する。
-5. 採用した実装と一致するよう本ADRを更新する。
+1. Run the design doc's P0 validation and record CLI versions, OS, and results.
+2. Settle the runtime and the behaviour when the managing TUI exits.
+3. Settle the discovery scope, including past ordinary sessions.
+4. Confirm the initial specification that "delete means hide from the list".
+5. Update this ADR to match the implementation that was adopted.
 
-本書は設計記録であり、agntの実装・実機検証が完了したことを示すものではない。
+This document is a design record. It does not indicate that agnt has been implemented or validated on a real machine.

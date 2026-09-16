@@ -1,50 +1,50 @@
-# P0 技術検証チェックリスト
+# P0 technical validation checklist
 
-- 対応文書: [design.md](design.md) §13、[adr/0001-architecture.md](adr/0001-architecture.md) §6
-- ステータス: **未実施**
+- Related documents: [design.md](design.md) §13, [adr/0001-architecture.md](adr/0001-architecture.md) §6
+- Status: **not started**
 
-**実行基盤を決めるための検証であり、UIの作り込みより先に行う。** 各項目の結果を記録するまで、アダプタは全操作を`unsupported`のまま返す。結果が出ていない機能を「対応済み」として表示しない。
+**This validation exists to choose the runtime, and comes before polishing the UI.** Until a check's result is recorded here, the corresponding adapter operation keeps returning `unsupported`. A feature with no recorded result is never displayed as supported.
 
-## 記録する環境
+## Environment to record
 
-| 項目 | 値 |
+| Item | Value |
 | --- | --- |
-| OS／バージョン | 未記録 |
-| Claude Code バージョン | 未記録 |
-| Codex CLI バージョン | 未記録 |
-| 端末 | 未記録 |
-| 実施日 | 未記録 |
+| OS / version | not recorded |
+| Claude Code version | not recorded |
+| Codex CLI version | not recorded |
+| Terminal | not recorded |
+| Date run | not recorded |
 
-## 検証項目
+## Checks
 
-| # | 検証 | 合格条件・記録する事項 | 結果 |
+| # | Check | Pass condition and what to record | Result |
 | --- | --- | --- | --- |
-| V1 | 実際のJSON／APIを取得 | タイトル、状態、ID、履歴範囲を記録し、`RuntimeState`への対応表を作る | 未実施 |
-| V2 | 新規起動とID取得 | cwdを守り、重複起動なく正式IDへ結び付く | 未実施 |
-| V3 | Claudeの起動・attach・復帰 | 作業中にagntへ戻り、同じ会話と処理に再接続できる | 未実施 |
-| V4 | Codexの起動・標準画面接続・復帰 | ターンを中断せずagntへ戻り、継続中または完了した処理を確認できる | 未実施 |
-| V5 | 承認待ち・入力待ちでの復帰 | 未応答要求が失われず、再接続して回答できる | 未実施 |
-| V6 | 同時クライアント | 観測接続と標準画面で要求が二重処理されない | 未実施 |
-| V7 | サービスの寿命 | agnt正常終了、Ghostty終了、接続断の結果を区別して記録 | 未実施 |
-| V8 | 外部セッションと過去履歴 | 発見・状態・再開の範囲を確認。Claudeの履歴列挙方法を選ぶ | 未実施 |
-| V9 | 端末復元 | raw mode、カーソル、サイズ、貼付けが復帰後に正常 | 未実施 |
+| V1 | Fetch the real JSON / API | Record title, state, ID, and history scope, and map them onto `RuntimeState` | not started |
+| V2 | Start a new session and get its ID | The cwd is respected and the row binds to the permanent ID with no duplicate launch | not started |
+| V3 | Claude start, attach, and return | Return to agnt mid-work and reattach to the same conversation and work | not started |
+| V4 | Codex start, standard-screen attach, and return | Return to agnt without interrupting the turn, and see work still running or finished | not started |
+| V5 | Returning while waiting for approval or input | No unanswered request is lost; reattach and answer it | not started |
+| V6 | Concurrent clients | The observation connection and the standard screen do not both process a request | not started |
+| V7 | Service lifetime | Record agnt's normal exit, Ghostty's exit, and a dropped connection separately | not started |
+| V8 | External sessions and past history | Confirm the scope of discovery, state, and resume. Choose how to enumerate Claude's history | not started |
+| V9 | Terminal restoration | Raw mode, cursor, size, and paste all behave normally after returning | not started |
 
-検証の基本手順は「新規起動 → 長い処理 → 公式画面に接続 → 一覧へ戻る → 再接続」を両プロバイダーで実施する。
+The basic procedure is to run "start new → long-running work → attach to the official screen → return to the list → reattach" on both providers.
 
-## 未決定事項との対応
+## Mapping to the open questions
 
-| ID | 判断すること | 対応する検証 |
+| ID | What to decide | Covering checks |
 | --- | --- | --- |
-| Q1 | Codex標準CLIの非中断離脱と要求配送 | V4、V5、V6 |
-| Q2 | 公式CLI画面の維持をどこまで必須にするか | V3、V4 |
-| Q3 | agnt／Ghostty終了後も継続を保証するか | V7 |
-| Q4 | 過去の通常Claudeセッションをどう列挙するか | V8 |
-| Q5 | 削除は一覧非表示で十分か | 初期仕様の受け入れ時。検証対象外 |
-| Q6 | 最初のOS、最低CLIバージョン、ライブラリ版 | 上の環境表 |
+| Q1 | Non-interrupting detach from the Codex standard CLI, and request delivery | V4, V5, V6 |
+| Q2 | How strictly keeping the official CLI screen is required | V3, V4 |
+| Q3 | Whether continuation after agnt or Ghostty exits is guaranteed | V7 |
+| Q4 | How past ordinary Claude sessions are enumerated | V8 |
+| Q5 | Whether hiding from the list is enough for "delete" | When the initial specification is accepted. Not a validation item |
+| Q6 | The first OS, the minimum CLI versions, and library versions | The environment table above |
 
-## 検証後の作業
+## Work after validating
 
-1. 上の表に結果と実測値を記入する。
-2. Codexの標準画面との往復が不成立なら、PTY、独自Codex UI、tmuxのコストを比較し、ADR-0001を更新してから実装に進む。tmux導入を決定済みとして扱わない。
-3. 確定した挙動に合わせて、該当アダプタの`capabilities`と各操作を実装する。`P0_REASON`を削除するのは、その操作の検証が終わったときに限る。
-4. ADR-0001を実装と一致するよう更新し、ステータスをAcceptedに進める条件（§6）を確認する。
+1. Fill in the results and the measured values in the table above.
+2. If the round trip to Codex's standard screen does not work, compare the cost of PTY, a custom Codex UI, and tmux, and update ADR-0001 before implementing. Adopting tmux is not treated as already decided.
+3. Implement the affected adapter's `capabilities` and operations to match the confirmed behaviour. Remove `P0_REASON` for an operation only once that operation's check is done.
+4. Update ADR-0001 to match the implementation, and review the conditions for moving it to Accepted (§6).

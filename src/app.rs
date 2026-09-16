@@ -133,7 +133,7 @@ impl App {
             None => (BTreeMap::new(), None),
         };
         for s in sessions.values_mut() {
-            s.runtime.mark_stale("前回の観測（キャッシュ）");
+            s.runtime.mark_stale("previous observation (cache)");
         }
         let mut app = Self {
             sessions,
@@ -228,7 +228,7 @@ impl App {
         match self.grouping {
             Grouping::Runtime => match v.state() {
                 RuntimeState::WaitingApproval | RuntimeState::WaitingInput => {
-                    "承認待ち・入力待ち".to_string()
+                    "Waiting approval or input".to_string()
                 }
                 s => s.label().to_string(),
             },
@@ -286,7 +286,7 @@ impl App {
 
     fn edit_meta(&mut self, key: &SessionKey, f: impl FnOnce(&mut SessionMeta)) -> Result<(), String> {
         if let Some(err) = &self.metadata_error {
-            return Err(format!("メタデータを編集できません: {err}"));
+            return Err(format!("cannot edit metadata: {err}"));
         }
         let meta = self
             .store
@@ -346,7 +346,7 @@ impl App {
                     if d.complete {
                         self.sessions.remove(&k);
                     } else if let Some(s) = self.sessions.get_mut(&k) {
-                        s.runtime.mark_stale("最新の取得結果に含まれない");
+                        s.runtime.mark_stale("not in the latest discovery result");
                     }
                 }
                 self.provider_status.insert(
@@ -361,7 +361,7 @@ impl App {
             Err(e) => {
                 // A fetch failure is not the session's error: keep rows, mark stale.
                 for s in self.sessions.values_mut().filter(|s| s.key.provider == provider) {
-                    s.runtime.mark_stale(format!("取得失敗: {e}"));
+                    s.runtime.mark_stale(format!("discovery failed: {e}"));
                 }
                 self.provider_status.insert(
                     provider,
@@ -391,7 +391,7 @@ impl App {
             Err(e) if e.is_unsupported() => {}
             Err(e) => {
                 for s in self.sessions.values_mut().filter(|s| s.key.provider == provider) {
-                    s.runtime.mark_stale(format!("状態更新失敗: {e}"));
+                    s.runtime.mark_stale(format!("state update failed: {e}"));
                 }
                 self.provider_status.insert(
                     provider,
@@ -423,7 +423,7 @@ impl App {
                 self.mode = Mode::Normal;
             }
             Err(e) => {
-                self.mode = Mode::Message(format!("{}: 起動できません: {e}", provider.label()));
+                self.mode = Mode::Message(format!("{}: cannot start: {e}", provider.label()));
             }
         }
         self.ensure_selection();
@@ -446,10 +446,10 @@ impl App {
             }
             Ok(StopResult::Requested { note }) => {
                 // Not confirmed: never hide silently.
-                self.mode = Mode::Message(format!("停止を要求しました（未確認）: {note}"));
+                self.mode = Mode::Message(format!("stop requested, not yet confirmed: {note}"));
             }
             Err(e) => {
-                self.mode = Mode::Message(format!("停止できません: {e}"));
+                self.mode = Mode::Message(format!("cannot stop: {e}"));
             }
         }
         self.ensure_selection();
@@ -468,10 +468,10 @@ impl App {
             .filter(|s| s.origin == Origin::Managed && s.runtime.state.is_live())
             .count();
         if managed == 0 {
-            "agntが起動した実行中のセッションはありません。各ツール側の処理には影響しません。".to_string()
+            "No running session was started by agnt. Work inside each tool is unaffected.".to_string()
         } else {
             format!(
-                "agntが起動したセッションが{managed}件あります。実行基盤の継続保証はP0で未確定です（docs/design.md §7）。"
+                "agnt started {managed} session(s). Whether the runtime keeps them alive is undecided until P0 (docs/design.md §7)."
             )
         }
     }
@@ -716,18 +716,18 @@ pub fn parse_new_input(text: &str) -> Result<StartRequest, String> {
     let text = text.trim();
     let (provider_text, rest) = text
         .split_once(char::is_whitespace)
-        .ok_or_else(|| "形式: <claude|codex> <cwd> [-- <初期プロンプト>]".to_string())?;
+        .ok_or_else(|| "format: <claude|codex> <cwd> [-- <initial prompt>]".to_string())?;
     let provider: Provider = provider_text.parse()?;
     let (cwd_text, prompt) = match rest.split_once(" -- ") {
         Some((c, p)) => (c.trim(), Some(p.trim().to_string()).filter(|p| !p.is_empty())),
         None => (rest.trim(), None),
     };
     if cwd_text.is_empty() {
-        return Err("cwdを指定してください".to_string());
+        return Err("give a working directory".to_string());
     }
     let cwd = expand_home(cwd_text);
     if !cwd.is_dir() {
-        return Err(format!("cwdが存在しません: {}", cwd.display()));
+        return Err(format!("cwd does not exist: {}", cwd.display()));
     }
     Ok(StartRequest {
         operation_id: new_operation_id(provider),
@@ -837,7 +837,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 Effect::Refresh => spawn_refresh(&mut app, &adapters, ev_tx.clone()),
                 Effect::Attach(key) | Effect::Resume(key) => {
                     let Some(adapter) = adapter_for(&adapters, key.provider) else {
-                        app.mode = Mode::Message(format!("{} のアダプタがありません", key.provider.label()));
+                        app.mode = Mode::Message(format!("no adapter for {}", key.provider.label()));
                         continue;
                     };
                     let is_attach = matches!(app.mode, Mode::Normal)
@@ -852,10 +852,10 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                             let status = terminal::handoff(&mut guard, &gate, &plan).await;
                             app.mode = match status {
                                 Ok(s) => Mode::Message(format!(
-                                    "{} が終了しました ({s})。状態を再取得します。",
+                                    "{} exited ({s}). Refreshing state.",
                                     plan.program.display()
                                 )),
-                                Err(e) => Mode::Message(format!("起動に失敗しました: {e}")),
+                                Err(e) => Mode::Message(format!("could not start it: {e}")),
                             };
                             spawn_refresh(&mut app, &adapters, ev_tx.clone());
                         }
@@ -1076,7 +1076,7 @@ mod tests {
         assert!(app.metadata_error.is_some());
         assert_eq!(app.session_keys_in_order().len(), 1);
         app.handle_key(key('m'));
-        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("編集できません")));
+        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("cannot edit metadata")));
         assert_eq!(
             std::fs::read(Paths::at(dir.path()).metadata_json()).unwrap(),
             b"{oops"
@@ -1165,7 +1165,7 @@ mod tests {
     fn search_filters_rows_and_esc_clears() {
         let dir = tempfile::tempdir().unwrap();
         let mut a = session(Provider::Claude, "a", RuntimeState::Idle);
-        a.title = Some("認証処理の修正".into());
+        a.title = Some("Fix the auth handler".into());
         let mut b = session(Provider::Codex, "b", RuntimeState::Idle);
         b.title = Some("flaky test".into());
         let mut app = app_with(&dir, vec![a, b]);
@@ -1197,8 +1197,10 @@ mod tests {
             )),
         );
         let rows = app.rows();
-        assert!(matches!(&rows[0], ListRow::Group { label, count: 2 } if label == "承認待ち・入力待ち"));
-        assert!(matches!(&rows[3], ListRow::Group { label, count: 1 } if label == "待機"));
+        assert!(
+            matches!(&rows[0], ListRow::Group { label, count: 2 } if label == "Waiting approval or input")
+        );
+        assert!(matches!(&rows[3], ListRow::Group { label, count: 1 } if label == "Idle"));
     }
 
     #[test]

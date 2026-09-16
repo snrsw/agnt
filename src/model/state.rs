@@ -34,14 +34,14 @@ impl RuntimeState {
     /// Display label from the design doc (section 5).
     pub fn label(self) -> &'static str {
         match self {
-            RuntimeState::Starting => "起動中",
-            RuntimeState::Running => "作業中",
-            RuntimeState::WaitingApproval => "承認待ち",
-            RuntimeState::WaitingInput => "入力待ち",
-            RuntimeState::Idle => "待機",
-            RuntimeState::Stopped => "停止",
-            RuntimeState::Error => "エラー",
-            RuntimeState::Unknown => "不明",
+            RuntimeState::Starting => "Starting",
+            RuntimeState::Running => "Running",
+            RuntimeState::WaitingApproval => "Waiting approval",
+            RuntimeState::WaitingInput => "Waiting input",
+            RuntimeState::Idle => "Idle",
+            RuntimeState::Stopped => "Stopped",
+            RuntimeState::Error => "Error",
+            RuntimeState::Unknown => "Unknown",
         }
     }
 
@@ -108,10 +108,10 @@ impl WorkflowState {
 
     pub fn label(self) -> &'static str {
         match self {
-            WorkflowState::Unclassified => "未分類",
-            WorkflowState::InProgress => "進行中",
-            WorkflowState::Review => "レビュー",
-            WorkflowState::Done => "完了",
+            WorkflowState::Unclassified => "Unclassified",
+            WorkflowState::InProgress => "In progress",
+            WorkflowState::Review => "Review",
+            WorkflowState::Done => "Done",
         }
     }
 
@@ -161,8 +161,8 @@ impl Grouping {
 
     pub fn label(self) -> &'static str {
         match self {
-            Grouping::Runtime => "実行状態",
-            Grouping::Workflow => "作業分類",
+            Grouping::Runtime => "runtime state",
+            Grouping::Workflow => "work classification",
         }
     }
 }

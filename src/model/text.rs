@@ -86,6 +86,10 @@ mod tests {
 
     #[test]
     fn truncates_by_cell_width_not_bytes() {
+        // A session title can hold any text a provider returns, so the
+        // wide-character case needs real double-width characters: these seven
+        // are 21 bytes and occupy 14 cells, so a 6-cell budget fits two of
+        // them plus the ellipsis.
         assert_eq!(truncate_to_width("認証処理の修正", 6), "認証…");
         assert_eq!(truncate_to_width("short", 10), "short");
         assert_eq!(truncate_to_width("abcdef", 4), "abc…");

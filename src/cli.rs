@@ -96,7 +96,7 @@ async fn run_command(paths: Paths, cmd: Command) -> anyhow::Result<ExitCode> {
             let key = resolve(&paths, &id)?;
             let now = chrono::Utc::now();
             MetadataStore::new(&paths).update(|m| m.entry(&key).hidden_at = Some(now))?;
-            println!("hidden: {key}（履歴は各ツール側に残ります）");
+            println!("hidden: {key} (history is kept by the tool)");
             Ok(ExitCode::SUCCESS)
         }
         Command::Restore { id } => {
@@ -264,11 +264,11 @@ async fn list(paths: &Paths, json: bool, hidden: bool, no_refresh: bool) -> anyh
         return Ok(ExitCode::SUCCESS);
     }
     println!(
-        "{} {} {} {} 作業場所",
-        text::pad_to_width("状態", 12),
+        "{} {} {} {} Location",
+        text::pad_to_width("State", 12),
         text::pad_to_width("Agent", 6),
         text::pad_to_width("ID", 10),
-        text::pad_to_width("内容", 40),
+        text::pad_to_width("Content", 40),
     );
     for v in &views {
         println!(
@@ -381,7 +381,7 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
     println!();
     match github::gh_version().await {
         Ok(v) => println!("gh: {v}"),
-        Err(e) => println!("gh: ✗ {e} (URL登録・表示は使えます)"),
+        Err(e) => println!("gh: x {e} (registering and showing URLs still works)"),
     }
     match git::git_binary() {
         Some(g) => println!("git: {}", g.display()),

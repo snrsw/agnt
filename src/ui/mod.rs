@@ -10,7 +10,7 @@ use crate::app::{App, ListRow, Mode};
 use crate::model::{RuntimeState, SessionView, text};
 
 /// Below this width the branch and link columns move into the detail pane.
-const WIDE_MIN_COLS: u16 = 100;
+const WIDE_MIN_COLS: u16 = 110;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -33,24 +33,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         Span::styled(" agnt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" グループ: {} ", app.grouping.label())),
+        Span::raw(format!(" grouped by {} ", app.grouping.label())),
     ];
     if !app.query.is_empty() || app.mode == Mode::Search {
-        spans.push(Span::raw(format!(" 検索: {}▏", app.query)));
+        spans.push(Span::raw(format!(" search: {}_ ", app.query)));
     }
     if app.show_hidden {
-        spans.push(Span::raw(format!(" 非表示を表示中 ({}) ", app.hidden_count())));
+        spans.push(Span::raw(format!(" showing hidden ({}) ", app.hidden_count())));
     }
     if app.refreshing {
-        spans.push(Span::raw(" 更新中… "));
+        spans.push(Span::raw(" refreshing... "));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The state cell. A stale row names the state it last held, so the longest
+/// possible cell is `Unknown (Waiting approval)` — which is what `W_STATE` is
+/// sized for.
 fn state_text(v: &SessionView) -> String {
     let r = &v.session.runtime;
     match (r.state, r.last_known_state) {
-        (RuntimeState::Unknown, Some(prev)) => format!("{} (前回: {})", r.state.label(), prev.label()),
+        (RuntimeState::Unknown, Some(prev)) => format!("{} ({})", r.state.label(), prev.label()),
         _ => r.state.label().to_string(),
     }
 }
@@ -78,10 +81,10 @@ fn links_text(v: &SessionView) -> String {
 }
 
 /// Column widths in terminal cells. The title column takes what is left.
-const W_STATE: usize = 20;
+const W_STATE: usize = 26;
 const W_AGENT: usize = 6;
-const W_PLACE: usize = 32;
-const W_LINKS: usize = 24;
+const W_PLACE: usize = 28;
+const W_LINKS: usize = 20;
 const W_MARKER: usize = 2;
 
 /// One list line, laid out by hand. A `Table` would clip a group header to
@@ -106,9 +109,9 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     let rows = app.rows();
     if rows.is_empty() {
         let msg = if app.session_count() == 0 {
-            "セッションがありません。r で再取得、n で新規起動。プロバイダーの状態は下の行を参照。"
+            "No sessions. Press r to refresh, n to start one. Provider status is on the line below."
         } else {
-            "条件に一致する行がありません。/ で検索を変更、H で非表示行を表示。"
+            "No rows match. Press / to change the search, H to show hidden rows."
         };
         frame.render_widget(Paragraph::new(msg).wrap(Wrap { trim: true }), area);
         return;
@@ -120,16 +123,16 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     let title_width = total.saturating_sub(fixed).max(4);
 
     let mut header = String::from("  ");
-    header.push_str(&text::pad_to_width("状態", W_STATE));
+    header.push_str(&text::pad_to_width("State", W_STATE));
     header.push(' ');
     header.push_str(&text::pad_to_width("Agent", W_AGENT));
     header.push(' ');
-    header.push_str(&text::pad_to_width("内容", title_width));
+    header.push_str(&text::pad_to_width("Content", title_width));
     if wide {
         header.push(' ');
-        header.push_str(&text::pad_to_width("作業場所／ブランチ", W_PLACE));
+        header.push_str(&text::pad_to_width("Location / branch", W_PLACE));
         header.push(' ');
-        header.push_str(&text::pad_to_width("関連", W_LINKS));
+        header.push_str(&text::pad_to_width("Related", W_LINKS));
     }
 
     let mut selected_index = None;
@@ -190,11 +193,11 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
     place.push_str(&format!("  {}", links_text(&v)));
     if v.is_hidden() {
-        place.push_str("  (非表示)");
+        place.push_str("  (hidden)");
     }
     let observed = match v.session.runtime.observed_at {
         Some(t) => format!(
-            "最終観測: {}  根拠: {}  分類: {}  origin: {}  id: {}",
+            "last observed {}  evidence: {}  class: {}  origin: {}  id: {}",
             t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
             text::sanitize(&v.session.runtime.evidence),
             v.workflow().label(),
@@ -202,7 +205,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
             v.key().qualified(),
         ),
         None => format!(
-            "最終観測: 未観測  分類: {}  origin: {}  id: {}",
+            "last observed: never  class: {}  origin: {}  id: {}",
             v.workflow().label(),
             v.session.origin.as_str(),
             v.key().qualified()
@@ -225,10 +228,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             Some(s) => format!(
                 "{}: {}{}",
                 p.label(),
-                if s.ok { "" } else { "✗ " },
+                if s.ok { "" } else { "x " },
                 text::sanitize(&s.note)
             ),
-            None => format!("{}: 未取得", p.label()),
+            None => format!("{}: not fetched", p.label()),
         })
         .collect();
     lines.push(Line::from(text::truncate_to_width(
@@ -237,12 +240,12 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     )));
     if let Some(err) = &app.metadata_error {
         lines.push(Line::from(text::truncate_to_width(
-            &format!("メタデータ編集停止: {}", text::sanitize(err)),
+            &format!("metadata editing disabled: {}", text::sanitize(err)),
             width,
         )));
     }
     lines.push(Line::from(text::truncate_to_width(
-        "j/k 移動  Enter 接続/再開  n 新規  / 検索  Tab グループ  m 分類  l リンク  d 削除  r 更新  H 非表示  q 終了",
+        "j/k move  Enter attach/resume  n new  / search  Tab group  m class  l link  d delete  r refresh  H hidden  q quit",
         width,
     )));
     frame.render_widget(
@@ -271,47 +274,47 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
     let (title, body): (&str, Vec<String>) = match &app.mode {
         Mode::Normal | Mode::Search => return,
         Mode::NewInput { buffer } => (
-            "新規起動",
+            "Start a session",
             vec![
-                "<claude|codex> <cwd> [-- <初期プロンプト>]   Enter 起動 / Esc 戻る".into(),
+                "<claude|codex> <cwd> [-- <initial prompt>]   Enter start / Esc back".into(),
                 format!("> {buffer}▏"),
             ],
         ),
         Mode::LinkInput { key, buffer } => (
-            "PR／issue URL を登録",
+            "Register a PR / issue URL",
             vec![
-                format!("対象: {}", key.qualified()),
-                "Enter 登録 / Esc 戻る".into(),
+                format!("target: {}", key.qualified()),
+                "Enter register / Esc back".into(),
                 format!("> {buffer}▏"),
             ],
         ),
         Mode::HideDialog { key, live } => {
             let mut lines = vec![
-                format!("対象: {}", key.qualified()),
-                "一覧から非表示にします。履歴は各ツール側に残ります（削除しません）。".into(),
+                format!("target: {}", key.qualified()),
+                "Hides the row from this list. History stays in the tool; nothing is deleted.".into(),
             ];
             if *live {
                 lines.push(
-                    "実行中です。  c: 継続したまま非表示   s: 停止を確認してから非表示   Esc: 戻る".into(),
+                    "It is running.  c: keep running and hide   s: stop first, then hide   Esc: back".into(),
                 );
             } else {
-                lines.push("y / Enter: 非表示   Esc: 戻る".into());
+                lines.push("y / Enter: hide   Esc: back".into());
             }
-            ("削除（非表示）", lines)
+            ("Delete (hide)", lines)
         }
         Mode::ChooseAction { key } => (
-            "操作を選択",
+            "Choose an operation",
             vec![
-                format!("対象: {}", key.qualified()),
-                "実行状態を判断できません。  a: 実行中の会話へ接続   r: 保存済み会話を再開   Esc: 戻る"
+                format!("target: {}", key.qualified()),
+                "The execution state is undecidable.  a: attach to a running conversation   r: resume a saved one   Esc: back"
                     .into(),
             ],
         ),
         Mode::QuitConfirm => (
-            "一覧を終了",
-            vec![app.quit_note(), "Enter / y: 終了   Esc: 戻る".into()],
+            "Leave the list",
+            vec![app.quit_note(), "Enter / y: quit   Esc: back".into()],
         ),
-        Mode::Message(msg) => ("メッセージ", vec![msg.clone(), "何かキーを押すと閉じます".into()]),
+        Mode::Message(msg) => ("Message", vec![msg.clone(), "Press any key to close".into()]),
     };
 
     let height = (body.len() as u16) + 2;
@@ -385,14 +388,14 @@ mod tests {
         let app = app_with(
             &dir,
             vec![
-                session("a", "認証処理の修正", RuntimeState::WaitingApproval),
-                session("b", "READMEの整理", RuntimeState::Idle),
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
             ],
         );
         let out = render(&app, 120, 24);
-        assert!(has(&out, "承認待ち・入力待ち (1)"), "{out}");
-        assert!(has(&out, "認証処理の修正"), "{out}");
-        assert!(has(&out, "待機 (1)"), "{out}");
+        assert!(has(&out, "Waiting approval or input (1)"), "{out}");
+        assert!(has(&out, "Fix the auth handler"), "{out}");
+        assert!(has(&out, "Idle (1)"), "{out}");
         assert!(has(&out, "PR #123"), "{out}");
         assert!(has(&out, "api"), "{out}");
     }
@@ -400,12 +403,15 @@ mod tests {
     #[test]
     fn narrow_terminal_keeps_state_and_title_only() {
         let dir = tempfile::tempdir().unwrap();
-        let app = app_with(&dir, vec![session("a", "認証処理の修正", RuntimeState::Running)]);
+        let app = app_with(
+            &dir,
+            vec![session("a", "Fix the auth handler", RuntimeState::Running)],
+        );
         let out = render(&app, 60, 20);
-        assert!(has(&out, "作業中"), "{out}");
-        assert!(has(&out, "認証処理の修正"), "{out}");
+        assert!(has(&out, "Running"), "{out}");
+        assert!(has(&out, "Fix the auth handler"), "{out}");
         // Branch and link columns move to the detail pane, which is still shown.
-        assert!(!has(&out, "作業場所／ブランチ"), "{out}");
+        assert!(!has(&out, "Location / branch"), "{out}");
         assert!(has(&out, "/Users/me/src/api"), "{out}");
     }
 
@@ -421,7 +427,7 @@ mod tests {
             }),
         );
         let out = render(&app, 120, 24);
-        assert!(has(&out, "不明 (前回: 作業中)"), "{out}");
+        assert!(has(&out, "Unknown (Running)"), "{out}");
     }
 
     #[test]
@@ -433,16 +439,16 @@ mod tests {
             live: true,
         };
         let out = render(&app, 100, 24);
-        assert!(has(&out, "削除（非表示）"), "{out}");
-        assert!(has(&out, "履歴は各ツール側に残ります"), "{out}");
-        assert!(has(&out, "停止を確認してから非表示"), "{out}");
+        assert!(has(&out, "Delete (hide)"), "{out}");
+        assert!(has(&out, "History stays in the tool"), "{out}");
+        assert!(has(&out, "stop first, then hide"), "{out}");
     }
 
     #[test]
     fn empty_and_tiny_terminals_do_not_panic() {
         let dir = tempfile::tempdir().unwrap();
         let empty = App::load(&Paths::at(dir.path()));
-        assert!(has(&render(&empty, 80, 24), "セッションがありません"));
+        assert!(has(&render(&empty, 80, 24), "No sessions"));
         for (w, h) in [(1u16, 1u16), (4, 2), (20, 3), (200, 60)] {
             let app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
             render(&app, w, h);

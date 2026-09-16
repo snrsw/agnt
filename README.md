@@ -22,9 +22,12 @@ The development environment is a Nix flake (`nix develop`, or `direnv allow` wit
 nix develop --command cargo build
 nix develop --command cargo test
 nix develop --command cargo run -- doctor
+nix develop --command cargo run --example render_dump   # print the list at two widths
 ```
 
 Without Nix, a stable Rust toolchain (1.93 or newer, edition 2024) works with plain `cargo`.
+
+All text — documents, code comments, and the strings the UI shows — is in English.
 
 ## Commands
 
