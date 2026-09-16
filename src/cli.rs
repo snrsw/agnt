@@ -19,6 +19,9 @@ pub const EXIT_UNSUPPORTED: u8 = 2;
 
 const LIST_REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Width of the state column in `agnt list`, sized for `Unknown (Waiting approval)`.
+const STATE_COL: usize = 26;
+
 #[derive(Parser, Debug)]
 #[command(name = "agnt", version, about = "Claude Code / Codex session list")]
 pub struct Cli {
@@ -265,7 +268,7 @@ async fn list(paths: &Paths, json: bool, hidden: bool, no_refresh: bool) -> anyh
     }
     println!(
         "{} {} {} {} Location",
-        text::pad_to_width("State", 12),
+        text::pad_to_width("State", STATE_COL),
         text::pad_to_width("Agent", 6),
         text::pad_to_width("ID", 10),
         text::pad_to_width("Content", 40),
@@ -273,7 +276,7 @@ async fn list(paths: &Paths, json: bool, hidden: bool, no_refresh: bool) -> anyh
     for v in &views {
         println!(
             "{} {} {} {} {}",
-            text::pad_to_width(v.state().label(), 12),
+            text::pad_to_width(&v.state_label(), STATE_COL),
             text::pad_to_width(v.session.provider().label(), 6),
             text::pad_to_width(&v.key().short_id(), 10),
             text::pad_to_width(&v.title().0, 40),

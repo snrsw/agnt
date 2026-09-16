@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, ListRow, Mode};
-use crate::model::{RuntimeState, SessionView, text};
+use crate::model::{SessionView, text};
 
 /// Below this width the branch and link columns move into the detail pane.
 const WIDE_MIN_COLS: u16 = 110;
@@ -47,17 +47,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The state cell. A stale row names the state it last held, so the longest
-/// possible cell is `Unknown (Waiting approval)` — which is what `W_STATE` is
-/// sized for.
-fn state_text(v: &SessionView) -> String {
-    let r = &v.session.runtime;
-    match (r.state, r.last_known_state) {
-        (RuntimeState::Unknown, Some(prev)) => format!("{} ({})", r.state.label(), prev.label()),
-        _ => r.state.label().to_string(),
-    }
-}
-
 fn place_text(v: &SessionView, with_branch: bool) -> String {
     let dir = v
         .session
@@ -91,7 +80,7 @@ const W_MARKER: usize = 2;
 /// the first column, so columns are padded here instead.
 fn session_line(v: &SessionView, wide: bool, title_width: usize) -> String {
     let mut line = String::new();
-    line.push_str(&text::pad_to_width(&state_text(v), W_STATE));
+    line.push_str(&text::pad_to_width(&v.state_label(), W_STATE));
     line.push(' ');
     line.push_str(&text::pad_to_width(v.session.provider().label(), W_AGENT));
     line.push(' ');
@@ -332,7 +321,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::model::{Link, LinkSource, Provider, Runtime, Session, SessionKey};
+    use crate::model::{Link, LinkSource, Provider, Runtime, RuntimeState, Session, SessionKey};
     use crate::providers::Discovery;
     use crate::storage::Paths;
     use ratatui::Terminal;

@@ -240,6 +240,17 @@ impl SessionView {
         (self.session.key.short_id(), TitleSource::ShortId)
     }
 
+    /// State as shown in a list. A stale row names the state it last held, so
+    /// the longest possible value is `Unknown (Waiting approval)`. Both the
+    /// TUI and `agnt list` use this, so the two agree.
+    pub fn state_label(&self) -> String {
+        let r = &self.session.runtime;
+        match (r.state, r.last_known_state) {
+            (RuntimeState::Unknown, Some(prev)) => format!("{} ({})", r.state.label(), prev.label()),
+            _ => r.state.label().to_string(),
+        }
+    }
+
     /// Sanitized preview, or the fixed "not fetched" marker.
     pub fn preview(&self) -> String {
         match self.session.preview.as_deref().filter(|p| !p.trim().is_empty()) {

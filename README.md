@@ -22,12 +22,34 @@ The development environment is a Nix flake (`nix develop`, or `direnv allow` wit
 nix develop --command cargo build
 nix develop --command cargo test
 nix develop --command cargo run -- doctor
-nix develop --command cargo run --example render_dump   # print the list at two widths
 ```
 
 Without Nix, a stable Rust toolchain (1.93 or newer, edition 2024) works with plain `cargo`.
 
 All text — documents, code comments, and the strings the UI shows — is in English.
+
+## Trying it locally
+
+**The adapters are stubs, so a plain `agnt` finds nothing.** To drive the real TUI, seed the list cache with sample sessions and point `AGNT_DATA_DIR` at a scratch directory so your real data is untouched.
+
+```sh
+export AGNT_DATA_DIR=/tmp/agnt-demo
+nix develop --command cargo run --example seed_demo   # four sample sessions
+nix develop --command cargo run                       # the TUI, with rows
+```
+
+Everything that does not need a provider works on that data: moving, grouping with `Tab`, searching with `/`, classifying with `m`, linking with `l`, hiding and restoring with `d`, and the dialogs. `Enter` and `n` reach the adapters and report why the operation is unsupported.
+
+Seeded rows show as `Unknown (Running)` and so on. That is deliberate: a state read from the cache is a previous observation, never a confirmed one.
+
+Two more ways to look at it without a terminal session:
+
+```sh
+nix develop --command cargo run --example render_dump  # the list drawn at 120 and 70 columns
+nix develop --command cargo run -- list --no-refresh   # the same rows as text
+```
+
+Delete `$AGNT_DATA_DIR` to start over.
 
 ## Commands
 
