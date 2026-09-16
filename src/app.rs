@@ -62,9 +62,8 @@ pub struct ProviderStatus {
 pub enum Mode {
     Normal,
     Search,
-    NewInput {
-        buffer: String,
-    },
+    /// The new-session prompt has focus. The bar itself is always drawn.
+    NewInput(NewSession),
     LinkInput {
         key: SessionKey,
         buffer: String,
@@ -82,14 +81,44 @@ pub enum Mode {
     Message(String),
 }
 
+/// What the new-session bar is holding: the task text plus the two things
+/// that would otherwise have to be typed every time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSession {
+    pub buffer: String,
+    pub provider: Provider,
+    /// Index into the directories offered by `cwd_choices`.
+    pub cwd_index: usize,
+}
+
+impl NewSession {
+    pub fn new(provider: Provider) -> Self {
+        Self {
+            buffer: String::new(),
+            provider,
+            cwd_index: 0,
+        }
+    }
+
+    pub fn cwd<'a>(&self, choices: &'a [PathBuf]) -> Option<&'a PathBuf> {
+        choices.get(self.cwd_index % choices.len().max(1))
+    }
+}
+
 /// Side effects requested by a key press; executed by the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     Refresh,
     Attach(SessionKey),
     Resume(SessionKey),
-    Stop { key: SessionKey, then_hide: bool },
-    Start(StartRequest),
+    Stop {
+        key: SessionKey,
+        then_hide: bool,
+    },
+    Start {
+        provider: Provider,
+        request: StartRequest,
+    },
     Quit,
 }
 
@@ -118,6 +147,8 @@ pub struct App {
     /// Keys a preview has already been requested for, so a slow or empty
     /// answer is not asked for again on every redraw.
     preview_requested: BTreeSet<SessionKey>,
+    /// Where agnt was started. The first directory a new session is offered.
+    launch_cwd: PathBuf,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -156,6 +187,7 @@ impl App {
             cache_saved_at,
             should_quit: false,
             preview_requested: BTreeSet::new(),
+            launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             store,
             cache,
         };
@@ -463,6 +495,36 @@ impl App {
         self.ensure_selection();
     }
 
+    /// Directories a new session can start in: where agnt was started, then
+    /// the selected row's directory, then every other directory in the list.
+    /// Offering these removes the most tedious part of typing a new session.
+    pub fn cwd_choices(&self) -> Vec<PathBuf> {
+        let mut out = vec![self.launch_cwd.clone()];
+        let push = |p: &PathBuf, out: &mut Vec<PathBuf>| {
+            if !out.contains(p) {
+                out.push(p.clone());
+            }
+        };
+        if let Some(v) = self.selected_view() {
+            push(&v.session.cwd, &mut out);
+        }
+        for row in self.rows() {
+            if let ListRow::Session(v) = row {
+                push(&v.session.cwd, &mut out);
+            }
+        }
+        out
+    }
+
+    /// The directory the new-session bar is currently pointing at.
+    pub fn new_session_cwd(&self, draft: &NewSession) -> PathBuf {
+        let choices = self.cwd_choices();
+        draft
+            .cwd(&choices)
+            .cloned()
+            .unwrap_or_else(|| self.launch_cwd.clone())
+    }
+
     /// The selected session's key, when its short content has not been
     /// fetched yet. Returns it once per key so drawing never queues repeats.
     pub fn take_preview_request(&mut self) -> Option<SessionKey> {
@@ -529,30 +591,37 @@ impl App {
                 self.ensure_selection();
                 Vec::new()
             }
-            Mode::NewInput { mut buffer } => match key.code {
-                KeyCode::Esc => {
-                    self.mode = Mode::Normal;
-                    Vec::new()
-                }
-                KeyCode::Enter => match parse_new_input(&buffer) {
-                    Ok(req) => vec![Effect::Start(req)],
-                    Err(e) => {
-                        self.mode = Mode::Message(e);
-                        Vec::new()
+            Mode::NewInput(mut draft) => {
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Esc => {
+                        self.mode = Mode::Normal;
+                        return Vec::new();
                     }
-                },
-                KeyCode::Backspace => {
-                    buffer.pop();
-                    self.mode = Mode::NewInput { buffer };
-                    Vec::new()
+                    KeyCode::Enter => {
+                        return self.submit_new_session(&draft);
+                    }
+                    // Cycle the agent and the directory, so neither has to be
+                    // typed to start a session somewhere other than the default.
+                    KeyCode::Char('a') if ctrl => {
+                        draft.provider = match draft.provider {
+                            Provider::Claude => Provider::Codex,
+                            Provider::Codex => Provider::Claude,
+                        };
+                    }
+                    KeyCode::Char('d') if ctrl => {
+                        let count = self.cwd_choices().len().max(1);
+                        draft.cwd_index = (draft.cwd_index + 1) % count;
+                    }
+                    KeyCode::Backspace => {
+                        draft.buffer.pop();
+                    }
+                    KeyCode::Char(c) if !ctrl => draft.buffer.push(c),
+                    _ => {}
                 }
-                KeyCode::Char(c) => {
-                    buffer.push(c);
-                    self.mode = Mode::NewInput { buffer };
-                    Vec::new()
-                }
-                _ => Vec::new(),
-            },
+                self.mode = Mode::NewInput(draft);
+                Vec::new()
+            }
             Mode::LinkInput {
                 key: target,
                 mut buffer,
@@ -638,11 +707,7 @@ impl App {
             KeyCode::Char('q') => self.mode = Mode::QuitConfirm,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('n') => {
-                self.mode = Mode::NewInput {
-                    buffer: String::new(),
-                }
-            }
+            KeyCode::Char('n') => self.mode = Mode::NewInput(NewSession::new(Provider::Claude)),
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Tab => {
                 self.grouping = self.grouping.toggle();
@@ -701,6 +766,30 @@ impl App {
         Vec::new()
     }
 
+    /// Turn the bar's contents into a start request. An empty task is refused
+    /// here rather than sent to a provider that would reject it.
+    fn submit_new_session(&mut self, draft: &NewSession) -> Vec<Effect> {
+        let prompt = draft.buffer.trim().to_string();
+        if prompt.is_empty() {
+            self.mode = Mode::Message("Type what the session should do, then press Enter.".into());
+            return Vec::new();
+        }
+        let cwd = self.new_session_cwd(draft);
+        if !cwd.is_dir() {
+            self.mode = Mode::Message(format!("cwd does not exist: {}", cwd.display()));
+            return Vec::new();
+        }
+        self.mode = Mode::Normal;
+        vec![Effect::Start {
+            provider: draft.provider,
+            request: StartRequest {
+                operation_id: new_operation_id(draft.provider),
+                cwd,
+                prompt: Some(prompt),
+            },
+        }]
+    }
+
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Discovered { provider, result } => {
@@ -737,32 +826,6 @@ fn is_older(candidate: &Runtime, current: &Runtime) -> bool {
         (Some(new), Some(cur)) => new < cur,
         _ => false,
     }
-}
-
-/// `n` input: `<claude|codex> <cwd> [-- <prompt>]`. The cwd may contain
-/// spaces; `--` separates it from the prompt. `~` expands to $HOME.
-pub fn parse_new_input(text: &str) -> Result<StartRequest, String> {
-    let text = text.trim();
-    let (provider_text, rest) = text
-        .split_once(char::is_whitespace)
-        .ok_or_else(|| "format: <claude|codex> <cwd> [-- <initial prompt>]".to_string())?;
-    let provider: Provider = provider_text.parse()?;
-    let (cwd_text, prompt) = match rest.split_once(" -- ") {
-        Some((c, p)) => (c.trim(), Some(p.trim().to_string()).filter(|p| !p.is_empty())),
-        None => (rest.trim(), None),
-    };
-    if cwd_text.is_empty() {
-        return Err("give a working directory".to_string());
-    }
-    let cwd = expand_home(cwd_text);
-    if !cwd.is_dir() {
-        return Err(format!("cwd does not exist: {}", cwd.display()));
-    }
-    Ok(StartRequest {
-        operation_id: new_operation_id(provider),
-        cwd,
-        prompt,
-    })
 }
 
 pub fn expand_home(path: &str) -> PathBuf {
@@ -929,13 +992,10 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                             .await;
                     });
                 }
-                Effect::Start(req) => {
-                    let provider: Provider = req
-                        .operation_id
-                        .split('-')
-                        .next()
-                        .and_then(|p| p.parse().ok())
-                        .unwrap_or(Provider::Claude);
+                Effect::Start {
+                    provider,
+                    request: req,
+                } => {
                     let Some(adapter) = adapter_for(&adapters, provider) else {
                         continue;
                     };
@@ -1254,16 +1314,108 @@ mod tests {
         assert!(matches!(&rows[3], ListRow::Group { label, count: 1 } if label == "Idle"));
     }
 
+    /// Typing a task and pressing Enter is the whole flow: no agent name and
+    /// no path, because both carry defaults.
     #[test]
-    fn new_input_parses_provider_cwd_and_prompt() {
+    fn typing_a_task_and_enter_starts_a_session() {
         let dir = tempfile::tempdir().unwrap();
-        let spaced = dir.path().join("my api");
-        std::fs::create_dir(&spaced).unwrap();
-        let req = parse_new_input(&format!("codex {} -- fix tests", spaced.display())).unwrap();
-        assert_eq!(req.cwd, spaced);
-        assert_eq!(req.prompt.as_deref(), Some("fix tests"));
-        assert!(req.operation_id.starts_with("codex-"));
-        assert!(parse_new_input("claude /definitely/missing/dir").is_err());
-        assert!(parse_new_input("gemini /tmp").is_err());
+        let mut app = app_with(&dir, vec![]);
+        app.launch_cwd = dir.path().to_path_buf();
+
+        app.handle_key(key('n'));
+        assert!(matches!(app.mode, Mode::NewInput(_)));
+        for c in "fix the flaky test".chars() {
+            app.handle_key(key(c));
+        }
+        let effects = app.handle_key(code(KeyCode::Enter));
+        match effects.as_slice() {
+            [Effect::Start { provider, request }] => {
+                assert_eq!(*provider, Provider::Claude);
+                assert_eq!(request.prompt.as_deref(), Some("fix the flaky test"));
+                assert_eq!(request.cwd, dir.path());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn an_empty_task_is_refused_rather_than_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.launch_cwd = dir.path().to_path_buf();
+        app.handle_key(key('n'));
+        app.handle_key(key(' '));
+        assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
+        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("Type what the session")));
+    }
+
+    #[test]
+    fn ctrl_a_switches_agent_and_ctrl_d_walks_the_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other-repo");
+        std::fs::create_dir(&other).unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.launch_cwd = dir.path().to_path_buf();
+        app.apply_discovery(
+            Provider::Codex,
+            Ok(Discovery {
+                sessions: vec![Session::new(SessionKey::new(Provider::Codex, "c1"), &other)],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+
+        app.handle_key(key('n'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::NewInput(d) => assert_eq!(d.provider, Provider::Codex),
+            other => panic!("unexpected {other:?}"),
+        }
+        // The launch directory comes first; Ctrl+D moves to the next one.
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        let draft = match &app.mode {
+            Mode::NewInput(d) => d.clone(),
+            other => panic!("unexpected {other:?}"),
+        };
+        assert_eq!(app.new_session_cwd(&draft), other);
+
+        // Ctrl+D is a control key, so it never lands in the task text.
+        assert!(draft.buffer.is_empty());
+    }
+
+    #[test]
+    fn directory_choices_start_at_the_launch_dir_and_have_no_repeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.launch_cwd = dir.path().to_path_buf();
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    Session::new(SessionKey::new(Provider::Claude, "a"), &repo),
+                    Session::new(SessionKey::new(Provider::Claude, "b"), &repo),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        let choices = app.cwd_choices();
+        assert_eq!(choices[0], dir.path());
+        assert_eq!(choices.iter().filter(|c| **c == repo).count(), 1);
+    }
+
+    #[test]
+    fn esc_leaves_the_bar_without_starting_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.handle_key(key('n'));
+        for c in "half typed".chars() {
+            app.handle_key(key(c));
+        }
+        assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(app.mode, Mode::Normal);
     }
 }

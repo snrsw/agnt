@@ -38,7 +38,32 @@ nix develop --command cargo run -- list        # your real Claude and Codex sess
 nix develop --command cargo run                # the TUI
 ```
 
-In the list, `Enter` attaches to a running Claude session and resumes a stopped one; on a row whose state cannot decide, it asks. `Tab` switches grouping, `/` searches, `m` classifies, `l` links a PR or issue, `d` hides, `H` shows hidden rows, `q` quits.
+To start a session, press `n` and type what it should do:
+
+```
+> fix the flaky billing test_
+  Claude - ~/src/api                    ^a agent  ^d directory  Enter start  Esc cancel
+```
+
+The task text is the only thing you have to type. The agent defaults to Claude and the directory to where agnt was started; `^a` and `^d` change them, and `^d` walks the directories already in the list, so starting work in a repo you can see takes two keystrokes instead of a typed path. Codex has no background start, so choosing it there says so rather than pretending.
+
+### Keys in the list
+
+| Key | Action |
+| --- | --- |
+| `j` / `k`, arrows | Move |
+| `Enter` | Attach when running, resume when stopped, otherwise ask |
+| `n` | Focus the new-session prompt: type the task, Enter starts it |
+| `/` | Search title, path, and link number |
+| `Tab` | Group by runtime state or by work classification |
+| `m` | Change work classification |
+| `l` | Register a PR / issue URL |
+| `d` | Hide dialog; hide a running session or stop it first. On a hidden row, restore it |
+| `r` | Request a refresh |
+| `H` | Show hidden sessions |
+| `q` | Leave the list |
+
+These apply while agnt owns the terminal. Inside an official CLI screen, that CLI's keys apply.
 
 If neither CLI has any sessions, seed the cache with samples instead:
 

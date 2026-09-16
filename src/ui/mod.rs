@@ -5,6 +5,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, ListRow, Mode};
 use crate::model::{SessionView, text};
@@ -15,10 +16,11 @@ const WIDE_MIN_COLS: u16 = 110;
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let status_lines = 2 + u16::from(app.metadata_error.is_some());
-    let [header, body, detail, status] = Layout::vertical([
+    let [header, body, detail, compose, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(5),
+        Constraint::Length(2),
         Constraint::Length(status_lines),
     ])
     .areas(area);
@@ -26,8 +28,92 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, header, app);
     draw_table(frame, body, app);
     draw_detail(frame, detail, app);
+    draw_compose(frame, compose, app);
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
+}
+
+/// The new-session bar, always on screen so starting work never needs a
+/// remembered command. Typing is the only required step: the agent and the
+/// directory carry defaults and are shown next to the prompt.
+fn draw_compose(frame: &mut Frame, area: Rect, app: &App) {
+    let width = area.width as usize;
+    let focused = matches!(app.mode, Mode::NewInput(_));
+
+    let (typed, provider, cwd) = match &app.mode {
+        Mode::NewInput(draft) => (draft.buffer.clone(), draft.provider, app.new_session_cwd(draft)),
+        _ => {
+            let draft = crate::app::NewSession::new(crate::model::Provider::Claude);
+            (String::new(), draft.provider, app.new_session_cwd(&draft))
+        }
+    };
+
+    let prompt = if focused {
+        format!("> {typed}_")
+    } else if typed.is_empty() {
+        "> Describe a task for a new session  (n)".to_string()
+    } else {
+        format!("> {typed}")
+    };
+
+    let target = format!("  {} - {}", provider.label(), short_path(&cwd));
+    let hint = if focused {
+        "^a agent  ^d directory  Enter start  Esc cancel"
+    } else {
+        ""
+    };
+    let gap = width.saturating_sub(target.width()).saturating_sub(hint.width());
+    let second = format!("{target}{}{hint}", " ".repeat(gap));
+
+    let mut prompt_style = Style::default();
+    if !focused {
+        prompt_style = prompt_style.add_modifier(Modifier::DIM);
+    }
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled(text::truncate_to_width(&prompt, width), prompt_style),
+            Line::styled(
+                text::truncate_to_width(&second, width),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]),
+        area,
+    );
+}
+
+/// A directory short enough to sit beside the prompt: `$HOME` becomes `~`,
+/// and a still-long path keeps its last components, which are the ones that
+/// identify the checkout. Worktree paths are long enough that the head is the
+/// part worth dropping.
+pub fn short_path(path: &std::path::Path) -> String {
+    const MAX: usize = 40;
+    let text = path.to_string_lossy();
+    let tilde = match std::env::var_os("HOME") {
+        Some(home) => {
+            let home = home.to_string_lossy().into_owned();
+            match text.strip_prefix(&home) {
+                Some(rest) => format!("~{rest}"),
+                None => text.clone().into_owned(),
+            }
+        }
+        None => text.clone().into_owned(),
+    };
+    if tilde.width() <= MAX {
+        return tilde;
+    }
+    let parts: Vec<&str> = tilde.split('/').filter(|p| !p.is_empty()).collect();
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 1; // the leading ellipsis
+    for part in parts.iter().rev() {
+        let next = used + part.width() + 1;
+        if next > MAX && !kept.is_empty() {
+            break;
+        }
+        used = next;
+        kept.push(part);
+    }
+    kept.reverse();
+    format!("\u{2026}/{}", kept.join("/"))
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
@@ -261,14 +347,8 @@ fn centered(area: Rect, width_pct: u16, height: u16) -> Rect {
 
 fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
     let (title, body): (&str, Vec<String>) = match &app.mode {
-        Mode::Normal | Mode::Search => return,
-        Mode::NewInput { buffer } => (
-            "Start a session",
-            vec![
-                "<claude|codex> <cwd> [-- <initial prompt>]   Enter start / Esc back".into(),
-                format!("> {buffer}▏"),
-            ],
-        ),
+        // Normal, Search, and NewInput are drawn inline, not as a dialog.
+        Mode::Normal | Mode::Search | Mode::NewInput(_) => return,
         Mode::LinkInput { key, buffer } => (
             "Register a PR / issue URL",
             vec![
@@ -442,5 +522,29 @@ mod tests {
             let app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
             render(&app, w, h);
         }
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::short_path;
+    use std::path::Path;
+
+    #[test]
+    fn home_becomes_tilde_and_short_paths_are_untouched() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if !home.is_empty() {
+            assert_eq!(short_path(&Path::new(&home).join("src/api")), "~/src/api");
+        }
+        assert_eq!(short_path(Path::new("/tmp/x")), "/tmp/x");
+    }
+
+    #[test]
+    fn a_long_path_keeps_its_tail() {
+        let p = Path::new("/Users/me/src/github.com/owner/agnt/.claude/worktrees/scaffold");
+        let out = short_path(p);
+        assert!(out.starts_with('\u{2026}'), "{out}");
+        assert!(out.ends_with("scaffold"), "{out}");
+        assert!(out.chars().count() <= 41, "{out}");
     }
 }

@@ -73,10 +73,17 @@ fn main() {
         }),
     );
 
-    for width in [120u16, 70] {
-        let mut t = Terminal::new(TestBackend::new(width, 20)).unwrap();
+    // Draw the same list twice: resting, then with the new-session bar focused.
+    for label in ["resting", "composing"] {
+        if label == "composing" {
+            let mut draft = agnt::app::NewSession::new(agnt::model::Provider::Claude);
+            draft.buffer = "fix the flaky billing test".into();
+            app.mode = agnt::app::Mode::NewInput(draft);
+        }
+        let width = 120u16;
+        let mut t = Terminal::new(TestBackend::new(width, 18)).unwrap();
         t.draw(|f| agnt::ui::draw(f, &app)).unwrap();
-        println!("=== {width} columns ===");
+        println!("=== {label} ===");
         for row in t.backend().buffer().content().chunks(width as usize) {
             println!("|{}|", row.iter().map(|c| c.symbol()).collect::<String>());
         }
