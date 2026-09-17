@@ -108,7 +108,7 @@ These are fictional examples. Below the selected row, a short latest preview, th
 | --- | --- |
 | type | Write a task for a new session. The prompt is always live |
 | Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
-| Up / Down | Move between rows |
+| Up / Down | Move between rows, wrapping at both ends |
 | Tab / Shift+Tab | The new session's agent / directory |
 | Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
 | Ctrl+F | Local search over title, path, and related number |
@@ -198,9 +198,9 @@ Right after launching, a row is created under an agnt-side temporary operation_i
 | State | Display | Basis |
 | --- | --- | --- |
 | Starting | Starting | A start request was accepted and the result is pending |
-| Running | Running | Trustworthy provider information says it is running |
-| WaitingApproval | Waiting approval | An explicit approval request |
-| WaitingInput | Waiting input | An explicit question or input request |
+| Running | Working | Trustworthy provider information says it is running |
+| WaitingApproval | Needs approval | An explicit approval request |
+| WaitingInput | Needs input | An explicit question or input request |
 | Idle | Idle | The execution environment is alive and no turn is currently running |
 | Stopped | Stopped | A managed execution's stop or exit was confirmed |
 | Error | Error | The tool reported an execution failure |

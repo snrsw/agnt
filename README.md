@@ -90,7 +90,7 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 | --- | --- |
 | type | Write a task for a new session — the prompt is always live |
 | `Enter` | Start it. On an empty prompt, attach to the selected row instead |
-| `↑` `↓` | Move |
+| `↑` `↓` | Move, wrapping at both ends |
 | `Tab` / `S-Tab` | The new session's agent / directory |
 | `Ctrl+T` | Cycle view: status, repository, workflow |
 | `Ctrl+F` | Search |

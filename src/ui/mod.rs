@@ -14,18 +14,32 @@ use std::collections::BTreeMap;
 
 use crate::model::{RuntimeState, SessionView, TitleSource, View, text};
 
+/// How many lines the typed task needs, so the input grows with it.
+fn wrapped_lines(text: &str, width: usize) -> usize {
+    if text.is_empty() || width == 0 {
+        return 1;
+    }
+    text.width().div_ceil(width).max(1)
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
-    let status_lines = 2 + u16::from(app.metadata_error.is_some());
-    // Each pane below the list is separated by its own rule. The detail pane
-    // is a rule plus three lines; the compose bar a rule plus two. The list
-    // takes what is left.
+
+    let input_w = (area.width as usize).saturating_sub(4).max(1);
+    // The input grows with the task instead of truncating it, up to a third
+    // of the screen. A pasted path should be readable, not clipped.
+    let grow_cap = ((area.height / 3).max(1) as usize).min(6);
+    let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
+    let compose_h = 1 + input_h + 1;
+
+    let status_h = 1 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
+
     let [header, body, detail, compose, status] = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(4),
         Constraint::Min(3),
         Constraint::Length(4),
-        Constraint::Length(3),
-        Constraint::Length(status_lines),
+        Constraint::Length(compose_h),
+        Constraint::Length(status_h),
     ])
     .areas(area);
 
@@ -37,6 +51,46 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_dialog(frame, area, app);
 }
 
+/// Three lines and a gap, the shape the agent view uses: what this is, where
+/// it is pointed, and what is in it.
+fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let width = area.width as usize;
+
+    let counts: Vec<String> = app
+        .state_summary()
+        .into_iter()
+        .map(|(label, n)| format!("{n} {label}"))
+        .collect();
+    let summary = if counts.is_empty() {
+        "no sessions".to_string()
+    } else {
+        counts.join(" · ")
+    };
+
+    let mut second = format!("{} view · {}", app.view.label(), short_path(app.launch_cwd()));
+    if !app.query.is_empty() || app.mode == Mode::Search {
+        second.push_str(&format!("  ·  search: {}_", app.query));
+    }
+    if app.refreshing {
+        second.push_str("  ·  refreshing");
+    }
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::styled("agnt", Style::default().add_modifier(Modifier::BOLD)),
+            Line::styled(
+                text::truncate_to_width(&second, width),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Line::styled(
+                text::truncate_to_width(&summary, width),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]),
+        area,
+    );
+}
+
 /// The new-session prompt. It is always live — typing anywhere in the list
 /// lands here — so it is drawn as an active field rather than as a hint.
 fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
@@ -44,36 +98,37 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
     let area = block.inner(outer);
     let width = area.width as usize;
 
-    let typed = &app.draft.buffer;
-    let cwd = app.new_session_cwd(&app.draft);
+    let [input_area, target_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-    let prompt = if typed.is_empty() {
-        Line::from(vec![
+    let typed = &app.draft.buffer;
+    let input = if typed.is_empty() {
+        Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
             Span::styled(
                 "Describe a task for a new session",
                 Style::default().add_modifier(Modifier::DIM),
             ),
-        ])
+        ]))
     } else {
-        Line::from(vec![
+        Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
-            Span::raw(text::truncate_to_width(typed, width.saturating_sub(3))),
+            Span::raw(typed.clone()),
             Span::raw("_"),
-        ])
+        ]))
+        .wrap(Wrap { trim: false })
     };
 
-    let target = format!("  {} - {}", app.draft.provider.label(), short_path(&cwd));
+    let cwd = app.new_session_cwd(&app.draft);
+    let target = format!("  {} · {}", app.draft.provider.label(), short_path(&cwd));
+
     frame.render_widget(block, outer);
+    frame.render_widget(input, input_area);
     frame.render_widget(
-        Paragraph::new(vec![
-            prompt,
-            Line::styled(
-                text::truncate_to_width(&target, width),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ]),
-        area,
+        Paragraph::new(Line::styled(
+            text::truncate_to_width(&target, width),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+        target_area,
     );
 }
 
@@ -110,34 +165,6 @@ pub fn short_path(path: &std::path::Path) -> String {
     }
     kept.reverse();
     format!("\u{2026}/{}", kept.join("/"))
-}
-
-fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
-    let (shown, folded) = app.shown_and_folded();
-    let mut spans = vec![
-        Span::styled(" agnt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" view: {} ", app.view.label())),
-        Span::styled(
-            format!(" {shown} listed "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ];
-    if folded > 0 {
-        spans.push(Span::styled(
-            format!(" {folded} in history (z) "),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-    }
-    if !app.query.is_empty() || app.mode == Mode::Search {
-        spans.push(Span::raw(format!(" search: {}_ ", app.query)));
-    }
-    if app.show_hidden {
-        spans.push(Span::raw(format!(" showing hidden ({}) ", app.hidden_count())));
-    }
-    if app.refreshing {
-        spans.push(Span::raw(" refreshing... "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Links as text, empty when there are none. A placeholder dash in a column
@@ -380,6 +407,9 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+/// What the selected session is, in plain words. The provider's raw evidence
+/// string belongs in `agnt doctor` and `agnt list --json`, not here: the thing
+/// worth knowing on screen is when it was last seen, not which command said so.
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::TOP);
     let inner = block.inner(area);
@@ -389,15 +419,13 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let width = inner.width as usize;
-    // The top line is the most prominent in the pane, so it carries the
-    // preview when there is one and the evidence when there is not, rather
-    // than spending itself on the words "no content".
-    let has_preview = v.session.preview.is_some();
-    let lead = if has_preview {
-        v.preview()
-    } else {
-        text::sanitize(&v.session.runtime.evidence)
+    let now = Utc::now();
+
+    let lead = match v.session.preview.as_deref() {
+        Some(_) => v.preview(),
+        None => "No preview yet.".to_string(),
     };
+
     let mut place = v.session.cwd.to_string_lossy().into_owned();
     if let Some(b) = v.branch_or_worktree() {
         place.push_str(&format!("  [{b}]"));
@@ -409,60 +437,38 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     if v.is_hidden() {
         place.push_str("  (hidden)");
     }
-    // The evidence is only repeated here when the top line did not take it.
-    let evidence = if has_preview {
-        format!("  evidence: {}", text::sanitize(&v.session.runtime.evidence))
-    } else {
-        String::new()
+
+    let seen = match v.age(now) {
+        Some(age) => format!("last seen {age} ago"),
+        None => "not seen yet".to_string(),
     };
-    let observed = match v.session.runtime.observed_at {
-        Some(t) => format!(
-            "last observed {}{evidence}  class: {}  origin: {}  id: {}",
-            t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
-            v.workflow().label(),
-            v.session.origin.as_str(),
-            v.key().qualified(),
-        ),
-        None => format!(
-            "last observed: never{evidence}  class: {}  origin: {}  id: {}",
-            v.workflow().label(),
-            v.session.origin.as_str(),
-            v.key().qualified()
-        ),
-    };
-    let lines = vec![
-        Line::from(text::truncate_to_width(&lead, width)),
-        Line::from(text::truncate_to_width(&text::sanitize(&place), width)),
-        Line::styled(
-            text::truncate_to_width(&observed, width),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(lines), inner);
+    let facts = format!(
+        "{} · {} · {} · {}",
+        v.state_label(),
+        seen,
+        v.workflow().label().to_lowercase(),
+        v.key().short_id(),
+    );
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(text::truncate_to_width(&lead, width)),
+            Line::from(text::truncate_to_width(&text::sanitize(&place), width)),
+            Line::styled(
+                text::truncate_to_width(&facts, width),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ]),
+        inner,
+    );
 }
 
-/// Provider state, then one short line of keys for what you are doing now.
-/// The full set lives behind `?` rather than across the bottom of the screen.
+/// One line of keys for what you are doing now, and nothing else unless
+/// something is wrong. A working provider does not need to announce itself,
+/// and the full key list is behind `?` rather than across the screen.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
     let mut lines = Vec::new();
-
-    let providers: Vec<String> = crate::model::Provider::ALL
-        .iter()
-        .map(|p| match app.provider_status.get(p) {
-            Some(s) => format!(
-                "{}: {}{}",
-                p.label(),
-                if s.ok { "" } else { "x " },
-                text::sanitize(&s.note)
-            ),
-            None => format!("{}: not fetched", p.label()),
-        })
-        .collect();
-    lines.push(Line::from(text::truncate_to_width(
-        &providers.join("  |  "),
-        width,
-    )));
 
     if let Some(err) = &app.metadata_error {
         lines.push(Line::from(text::truncate_to_width(
@@ -470,11 +476,17 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
             width,
         )));
     }
+    for (provider, status) in app.provider_status.iter().filter(|(_, s)| !s.ok) {
+        lines.push(Line::from(text::truncate_to_width(
+            &format!("{}: {}", provider.label(), text::sanitize(&status.note)),
+            width,
+        )));
+    }
 
     let hint = if !app.draft.buffer.trim().is_empty() {
         "enter to start · tab for agent · esc to clear"
     } else {
-        "type to start a session · enter to attach · ctrl+t view · ? for shortcuts"
+        "type to start a session · enter to attach · ? for shortcuts"
     };
     lines.push(Line::from(text::truncate_to_width(hint, width)));
 
@@ -643,11 +655,11 @@ mod tests {
             ],
         );
         let out = render(&app, 120, 24);
-        assert!(has(&out, "Waiting approval or input (1)"), "{out}");
+        assert!(has(&out, "Needs you (1)"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
         assert!(has(&out, "PR #123"), "{out}");
         // The second line qualifies the first: agent, state in words, place.
-        assert!(has(&out, "Claude · Waiting approval · api"), "{out}");
+        assert!(has(&out, "Claude · Needs approval · api"), "{out}");
         assert!(has(&out, "Idle (1)"), "{out}");
     }
 
@@ -667,7 +679,7 @@ mod tests {
         assert!(has(&out, "● 1  ◐ 0  ○ 1  · 0"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
         // One line each, so the card's second line is gone.
-        assert!(!has(&out, "Claude · Waiting approval · api"), "{out}");
+        assert!(!has(&out, "Claude · Needs approval · api"), "{out}");
     }
 
     /// Groups have to read as separate sections, so every heading but the
@@ -691,13 +703,14 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("no heading {needle} in\n{out}"))
         };
-        let first = heading("Waiting approval or input");
+        let first = heading("Needs you");
         let second = heading("Idle (1)");
 
-        // The first heading sits directly under the view header.
-        assert!(!lines[first - 1].trim().is_empty(), "{out}");
-        // The second is preceded by a blank line.
+        // A heading is followed straight away by its own rows.
+        assert!(!lines[first + 1].trim().is_empty(), "{out}");
+        // The next section is preceded by a blank line.
         assert!(lines[second - 1].trim().is_empty(), "{out}");
+        assert!(second > first + 1, "{out}");
     }
 
     /// The panes below the list are each fenced off by a rule, so the detail
@@ -729,7 +742,7 @@ mod tests {
             vec![session("a", "Fix the auth handler", RuntimeState::Running)],
         );
         let out = render(&app, 60, 20);
-        assert!(has(&out, "Running"), "{out}");
+        assert!(has(&out, "Working"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
         assert!(has(&out, "/Users/me/src/api"), "{out}");
     }
@@ -746,7 +759,7 @@ mod tests {
             }),
         );
         let out = render(&app, 120, 24);
-        assert!(has(&out, "Unknown (Running)"), "{out}");
+        assert!(has(&out, "Unknown (Working)"), "{out}");
     }
 
     #[test]
@@ -761,6 +774,44 @@ mod tests {
         assert!(has(&out, "Delete (hide)"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
+    }
+
+    /// A long task must stay readable rather than being clipped to one line.
+    #[test]
+    fn the_input_grows_with_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
+
+        let empty = render(&app, 80, 24);
+        let rows_when_empty = empty.lines().filter(|l| l.contains("Describe a task")).count();
+        assert_eq!(rows_when_empty, 1);
+
+        app.draft.buffer = "s".repeat(300);
+        let full = render(&app, 80, 24);
+        let typed_rows = full.lines().filter(|l| l.contains("ssss")).count();
+        assert!(typed_rows > 1, "the task should wrap, got one line:\n{full}");
+        // It stops growing before it eats the list.
+        assert!(typed_rows <= 6, "{full}");
+    }
+
+    /// A working provider says nothing; only a failing one is worth a line.
+    #[test]
+    fn the_footer_is_one_line_until_something_is_wrong() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "? for shortcuts"), "{out}");
+        assert!(!has(&out, "live jobs"), "{out}");
+
+        app.apply_discovery(
+            Provider::Claude,
+            Err(crate::providers::AdapterError::Timeout {
+                command: "claude".into(),
+                timeout_ms: 1,
+            }),
+        );
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "timed out"), "{out}");
     }
 
     #[test]

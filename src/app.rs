@@ -342,6 +342,40 @@ impl App {
         rows
     }
 
+    pub fn launch_cwd(&self) -> &std::path::Path {
+        &self.launch_cwd
+    }
+
+    /// True when a provider's last fetch failed. Only then is it worth a line
+    /// at the bottom of the screen; a working provider says nothing.
+    pub fn has_provider_problem(&self) -> bool {
+        self.provider_status.values().any(|s| !s.ok)
+    }
+
+    /// Counts for the header, in list order: how many need you, are working,
+    /// and so on, with folded history last.
+    pub fn state_summary(&self) -> Vec<(&'static str, usize)> {
+        let mut live: BTreeMap<u8, (&'static str, usize)> = BTreeMap::new();
+        let mut folded = 0usize;
+        for v in self.views() {
+            if !self.show_hidden && v.is_hidden() {
+                continue;
+            }
+            if v.is_history() && !self.show_history {
+                folded += 1;
+                continue;
+            }
+            let state = v.state();
+            let entry = live.entry(state.sort_rank()).or_insert((state.short_label(), 0));
+            entry.1 += 1;
+        }
+        let mut out: Vec<(&'static str, usize)> = live.into_values().collect();
+        if folded > 0 {
+            out.push(("in history", folded));
+        }
+        out
+    }
+
     /// Sessions currently listed, and how many are folded away behind `z`.
     pub fn shown_and_folded(&self) -> (usize, usize) {
         let visible: Vec<SessionView> = self
@@ -361,9 +395,7 @@ impl App {
     fn group_label(&self, v: &SessionView) -> String {
         match self.view {
             View::Status => match v.state() {
-                RuntimeState::WaitingApproval | RuntimeState::WaitingInput => {
-                    "Waiting approval or input".to_string()
-                }
+                RuntimeState::WaitingApproval | RuntimeState::WaitingInput => "Needs you".to_string(),
                 s => s.label().to_string(),
             },
             View::Workflow => v.workflow().label().to_string(),
@@ -402,18 +434,22 @@ impl App {
         self.selected = keys.first().cloned();
     }
 
+    /// Move the cursor, wrapping at both ends: past the last row is the first.
+    /// A list you scroll through repeatedly should not need a key to get back
+    /// to the top.
     fn move_selection(&mut self, delta: isize) {
         let keys = self.session_keys_in_order();
         if keys.is_empty() {
             self.selected = None;
             return;
         }
+        let len = keys.len() as isize;
         let current = self
             .selected
             .as_ref()
             .and_then(|k| keys.iter().position(|x| x == k))
             .unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, keys.len() as isize - 1) as usize;
+        let next = (current + delta).rem_euclid(len) as usize;
         self.selected = Some(keys[next].clone());
     }
 
@@ -1469,9 +1505,7 @@ mod tests {
             )),
         );
         let rows = app.rows();
-        assert!(
-            matches!(&rows[0], ListRow::Group(h) if h.label == "Waiting approval or input" && h.count == 2)
-        );
+        assert!(matches!(&rows[0], ListRow::Group(h) if h.label == "Needs you" && h.count == 2));
         assert!(matches!(&rows[3], ListRow::Group(h) if h.label == "Idle" && h.count == 1));
     }
 
@@ -1563,6 +1597,72 @@ mod tests {
         // They are still listed: the provider had them, so they are not history.
         assert_eq!(app.shown_and_folded(), (2, 0));
         assert_eq!(app.session_keys_in_order().len(), 2);
+    }
+
+    /// The cursor wraps at both ends, so a long list never needs a key to get
+    /// back to the top.
+    #[test]
+    fn the_cursor_is_cyclic() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "a", RuntimeState::WaitingApproval),
+                    at("/Users/me/src/reed", "b", RuntimeState::Running),
+                    at("/Users/me/src/reed", "c", RuntimeState::Idle),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        let order = app.session_keys_in_order();
+        assert_eq!(order.len(), 3);
+
+        app.selected = Some(order[0].clone());
+        // Up from the first row lands on the last.
+        app.handle_key(code(KeyCode::Up));
+        assert_eq!(app.selected.as_ref(), Some(&order[2]));
+        // Down from the last comes back to the first.
+        app.handle_key(code(KeyCode::Down));
+        assert_eq!(app.selected.as_ref(), Some(&order[0]));
+
+        // And a full lap returns where it started.
+        for _ in 0..order.len() {
+            app.handle_key(code(KeyCode::Down));
+        }
+        assert_eq!(app.selected.as_ref(), Some(&order[0]));
+    }
+
+    /// The header counts what is on screen, folded history included as its
+    /// own tally rather than silently missing from the total.
+    #[test]
+    fn the_header_summarises_what_is_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "a", RuntimeState::WaitingApproval),
+                    at("/Users/me/src/reed", "b", RuntimeState::Idle),
+                    at("/Users/me/src/reed", "c", RuntimeState::Stopped),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        assert_eq!(
+            app.state_summary(),
+            vec![("needs you", 1), ("idle", 1), ("in history", 1)]
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.state_summary(),
+            vec![("needs you", 1), ("idle", 1), ("stopped", 1)]
+        );
     }
 
     /// Tab moves between the two views the list is built around, plus the
@@ -1688,7 +1788,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(labels, vec!["Waiting approval or input", "Running"]);
+        assert_eq!(labels, vec!["Needs you", "Working"]);
     }
 
     /// Switching views must not lose the row you were on.

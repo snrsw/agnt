@@ -35,9 +35,9 @@ impl RuntimeState {
     pub fn label(self) -> &'static str {
         match self {
             RuntimeState::Starting => "Starting",
-            RuntimeState::Running => "Running",
-            RuntimeState::WaitingApproval => "Waiting approval",
-            RuntimeState::WaitingInput => "Waiting input",
+            RuntimeState::Running => "Working",
+            RuntimeState::WaitingApproval => "Needs approval",
+            RuntimeState::WaitingInput => "Needs input",
             RuntimeState::Idle => "Idle",
             RuntimeState::Stopped => "Stopped",
             RuntimeState::Error => "Error",
@@ -69,6 +69,19 @@ impl RuntimeState {
             RuntimeState::Idle => 4,
             RuntimeState::Stopped => 5,
             RuntimeState::Unknown => 6,
+        }
+    }
+
+    /// One lower-case word for the header's summary line.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            RuntimeState::Starting => "starting",
+            RuntimeState::Running => "working",
+            RuntimeState::WaitingApproval | RuntimeState::WaitingInput => "needs you",
+            RuntimeState::Idle => "idle",
+            RuntimeState::Stopped => "stopped",
+            RuntimeState::Error => "failed",
+            RuntimeState::Unknown => "unconfirmed",
         }
     }
 
