@@ -24,7 +24,7 @@
 | Reopen a saved conversation | `claude --resume <sessionId>` | `codex resume <SESSION_ID>` |
 | Stop | `claude stop <id>` | only through the App Server protocol |
 | Recent output | `claude logs <id>`, a terminal screen dump | none found |
-| Start in the background | `claude --bg <prompt>`, prints the id | none; `codex` starts interactively |
+| Start | `claude --bg <prompt>`, prints the id | `codex <prompt>`, interactive only |
 
 ## Checks
 
@@ -94,7 +94,7 @@ The sequence stripping is kept regardless: design.md §9 requires that text from
 | discover | supported | supported, from the history reader |
 | observe | supported | unsupported: needs the App Server |
 | preview | unsupported: `logs` is a screen dump | unsupported: only `session_meta` is read |
-| start | supported, needs an initial prompt. **V2 not run** | unsupported: no background start |
+| start | supported, background, needs an initial prompt. **V2 not run** | supported, interactive: agnt hands over the terminal and discovery picks the conversation up afterwards |
 | attach | supported. **V3 round trip not run** | unsupported: needs the App Server |
 | resume | supported | supported |
 | stop | supported. **V7 not run** | unsupported: needs the App Server |

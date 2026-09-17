@@ -17,7 +17,7 @@ use crate::model::{
     SessionView, session::sort_views,
 };
 use crate::providers::{
-    Adapter, AdapterError, Discovery, RuntimeUpdate, StartRequest, StartResult, StopResult,
+    Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
 use crate::storage::{CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
@@ -42,7 +42,7 @@ pub enum AppEvent {
     Started {
         provider: Provider,
         cwd: PathBuf,
-        result: Result<StartResult, AdapterError>,
+        result: Result<StartOutcome, AdapterError>,
     },
     Stopped {
         key: SessionKey,
@@ -119,6 +119,9 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
+    /// Give the terminal to a command, then refresh. Used when a provider can
+    /// only start interactively.
+    RunPlan(Box<AttachPlan>),
     Quit,
 }
 
@@ -445,14 +448,16 @@ impl App {
         }
     }
 
+    /// Record a background start. An interactive start has no identity yet, so
+    /// it is handled by the event loop instead and never reaches this.
     pub fn apply_started(
         &mut self,
         provider: Provider,
         cwd: PathBuf,
-        result: Result<StartResult, AdapterError>,
+        result: Result<StartOutcome, AdapterError>,
     ) {
         match result {
-            Ok(res) => {
+            Ok(StartOutcome::Started(res)) => {
                 let mut s = Session::new(res.key.clone(), cwd);
                 s.origin = Origin::Managed;
                 s.runtime = Runtime::observed(RuntimeState::Starting, "start requested", Utc::now());
@@ -462,6 +467,9 @@ impl App {
                 self.sessions.insert(res.key, s);
                 self.mode = Mode::Normal;
             }
+            // The event loop runs the plan; there is no row to add until the
+            // conversation exists and discovery finds it.
+            Ok(StartOutcome::Interactive(_)) => {}
             Err(e) => {
                 self.mode = Mode::Message(format!("{}: cannot start: {e}", provider.label()));
             }
@@ -601,15 +609,18 @@ impl App {
                     KeyCode::Enter => {
                         return self.submit_new_session(&draft);
                     }
-                    // Cycle the agent and the directory, so neither has to be
-                    // typed to start a session somewhere other than the default.
-                    KeyCode::Char('a') if ctrl => {
+                    // Tab cycles the agent and Shift+Tab the directory, so
+                    // neither is typed to start somewhere other than the
+                    // default. Tab is used rather than a Ctrl chord because
+                    // Ctrl+A and Ctrl+D mean line-start and delete in a text
+                    // field, and this field holds ordinary prose.
+                    KeyCode::Tab => {
                         draft.provider = match draft.provider {
                             Provider::Claude => Provider::Codex,
                             Provider::Codex => Provider::Claude,
                         };
                     }
-                    KeyCode::Char('d') if ctrl => {
+                    KeyCode::BackTab => {
                         let count = self.cwd_choices().len().max(1);
                         draft.cwd_index = (draft.cwd_index + 1) % count;
                     }
@@ -790,6 +801,23 @@ impl App {
         }]
     }
 
+    /// Apply an event and return any work it asks the event loop to do.
+    /// A provider that starts interactively needs the terminal, which only the
+    /// loop owns, so that comes back as an effect rather than being applied.
+    pub fn absorb(&mut self, event: AppEvent) -> Vec<Effect> {
+        if let AppEvent::Started {
+            result: Ok(StartOutcome::Interactive(plan)),
+            ..
+        } = &event
+        {
+            let plan = plan.clone();
+            self.mode = Mode::Normal;
+            return vec![Effect::RunPlan(Box::new(plan))];
+        }
+        self.handle_app_event(event);
+        Vec::new()
+    }
+
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Discovered { provider, result } => {
@@ -925,9 +953,9 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 }
             }
             Some(ev) = ev_rx.recv() => {
-                app.handle_app_event(ev);
+                effects.extend(app.absorb(ev));
                 while let Ok(ev) = ev_rx.try_recv() {
-                    app.handle_app_event(ev);
+                    effects.extend(app.absorb(ev));
                 }
             }
             else => break,
@@ -991,6 +1019,16 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                             })
                             .await;
                     });
+                }
+                Effect::RunPlan(plan) => {
+                    app.mode = Mode::Message(plan.note.clone());
+                    let status = terminal::handoff(&mut guard, &gate, &plan).await;
+                    app.mode = match status {
+                        Ok(s) if s.success() => Mode::Message("Back in the list. Refreshing.".into()),
+                        Ok(s) => Mode::Message(format!("{} exited with {s}.", plan.program.display())),
+                        Err(e) => Mode::Message(format!("could not run it: {e}")),
+                    };
+                    spawn_refresh(&mut app, &adapters, ev_tx.clone());
                 }
                 Effect::Start {
                     provider,
@@ -1351,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_a_switches_agent_and_ctrl_d_walks_the_directories() {
+    fn tab_switches_agent_and_shift_tab_walks_the_directories() {
         let dir = tempfile::tempdir().unwrap();
         let other = dir.path().join("other-repo");
         std::fs::create_dir(&other).unwrap();
@@ -1367,21 +1405,89 @@ mod tests {
         );
 
         app.handle_key(key('n'));
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.handle_key(code(KeyCode::Tab));
         match &app.mode {
             Mode::NewInput(d) => assert_eq!(d.provider, Provider::Codex),
             other => panic!("unexpected {other:?}"),
         }
-        // The launch directory comes first; Ctrl+D moves to the next one.
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        // Tab is a toggle, so a second press comes back to Claude.
+        app.handle_key(code(KeyCode::Tab));
+        match &app.mode {
+            Mode::NewInput(d) => assert_eq!(d.provider, Provider::Claude),
+            other => panic!("unexpected {other:?}"),
+        }
+        app.handle_key(code(KeyCode::Tab));
+
+        // The launch directory comes first; Shift+Tab moves to the next one.
+        app.handle_key(code(KeyCode::BackTab));
         let draft = match &app.mode {
             Mode::NewInput(d) => d.clone(),
             other => panic!("unexpected {other:?}"),
         };
         assert_eq!(app.new_session_cwd(&draft), other);
 
-        // Ctrl+D is a control key, so it never lands in the task text.
+        // Neither key leaves anything in the task text.
         assert!(draft.buffer.is_empty());
+        assert_eq!(draft.provider, Provider::Codex);
+    }
+
+    /// Ctrl chords in the bar are left to the text field, not stolen as
+    /// shortcuts: Ctrl+A means line-start to anyone typing prose.
+    #[test]
+    fn ctrl_chords_do_not_switch_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.handle_key(key('n'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        match &app.mode {
+            Mode::NewInput(d) => {
+                assert_eq!(d.provider, Provider::Claude);
+                assert!(d.buffer.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    /// A provider that can only start interactively hands a plan back to the
+    /// loop instead of inventing a row for a session that has no id yet.
+    #[test]
+    fn an_interactive_start_becomes_a_run_plan_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        let plan = AttachPlan {
+            program: "/usr/bin/codex".into(),
+            args: vec!["fix the test".into()],
+            cwd: Some("/tmp".into()),
+            note: "Codex starts interactively.".into(),
+        };
+        let effects = app.absorb(AppEvent::Started {
+            provider: Provider::Codex,
+            cwd: "/tmp".into(),
+            result: Ok(StartOutcome::Interactive(plan.clone())),
+        });
+        match effects.as_slice() {
+            [Effect::RunPlan(p)] => assert_eq!(**p, plan),
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(app.session_count(), 0);
+    }
+
+    #[test]
+    fn a_background_start_adds_the_row_without_a_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        let key = SessionKey::new(Provider::Claude, "new-1");
+        let effects = app.absorb(AppEvent::Started {
+            provider: Provider::Claude,
+            cwd: "/tmp".into(),
+            result: Ok(StartOutcome::Started(crate::providers::StartResult {
+                key: key.clone(),
+                handle: None,
+            })),
+        });
+        assert!(effects.is_empty());
+        assert_eq!(app.session_count(), 1);
+        assert_eq!(app.selected.as_ref(), Some(&key));
     }
 
     #[test]

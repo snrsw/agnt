@@ -1,9 +1,9 @@
 //! Provider adapters. The core and the TUI only see the `Adapter` trait and
 //! the shared `Session` model; tool-specific quirks stay inside each module.
 //!
-//! Both adapters currently report every operation as unsupported with the
-//! reason "P0 not validated". They gain real behaviour as the P0 checks in
-//! `docs/p0-validation.md` are recorded — never before.
+//! An operation an adapter cannot perform returns `Unsupported` with a reason,
+//! never a fake success. What each provider supports, and what has actually
+//! been validated, is recorded in `docs/p0-validation.md`.
 
 pub mod claude;
 pub mod codex;
@@ -48,6 +48,21 @@ pub struct StartRequest {
 pub struct StartResult {
     pub key: SessionKey,
     pub handle: Option<RuntimeHandle>,
+}
+
+/// How a provider starts work, which differs by tool and must not be hidden.
+///
+/// Claude starts a background session and hands back its identity. Codex has
+/// no background start at all: it only opens an interactive session, so the
+/// terminal has to be given to it and the new conversation is discovered
+/// afterwards. Collapsing these two into one shape would mean inventing an
+/// identity for a session that does not have one yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// The session is running in the background under this identity.
+    Started(StartResult),
+    /// Run this plan with the terminal; the session appears on the next refresh.
+    Interactive(AttachPlan),
 }
 
 /// A command to hand the terminal to. Executed by `terminal::handoff` with an
@@ -118,7 +133,7 @@ pub trait Adapter: Send + Sync {
     /// Short content, capped at `max_chars`. `Ok(None)` when nothing is available.
     async fn preview(&self, key: &SessionKey, max_chars: usize) -> Result<Option<String>, AdapterError>;
 
-    async fn start(&self, req: StartRequest) -> Result<StartResult, AdapterError>;
+    async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError>;
 
     /// Connect to a live execution. Distinct from `resume`.
     async fn attach(&self, key: &SessionKey) -> Result<AttachPlan, AdapterError>;

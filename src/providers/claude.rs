@@ -21,7 +21,8 @@ use serde::Deserialize;
 
 use super::process::{find_in_path, run, version_of};
 use super::{
-    Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartRequest, StartResult, StopResult,
+    Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StartResult,
+    StopResult,
 };
 use crate::model::{
     Capabilities, Operation, Origin, Provider, Runtime, RuntimeHandle, RuntimeState, Session, SessionKey,
@@ -293,7 +294,7 @@ impl Adapter for ClaudeAdapter {
         })
     }
 
-    async fn start(&self, req: StartRequest) -> Result<StartResult, AdapterError> {
+    async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError> {
         let bin = self.bin(Operation::Start)?;
         let prompt = req.prompt.as_deref().unwrap_or("").trim();
         if prompt.is_empty() {
@@ -329,10 +330,10 @@ impl Adapter for ClaudeAdapter {
             })
             .unwrap_or_else(|| job_id.clone());
 
-        Ok(StartResult {
+        Ok(StartOutcome::Started(StartResult {
             key: SessionKey::new(Provider::Claude, native),
             handle: Some(RuntimeHandle::ClaudeJob { job_id }),
-        })
+        }))
     }
 
     async fn attach(&self, key: &SessionKey) -> Result<AttachPlan, AdapterError> {

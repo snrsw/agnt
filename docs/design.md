@@ -83,7 +83,7 @@ This is a fictional example. Below the selected row, a short latest preview, the
 | --- | --- |
 | j/k, arrows | Move between rows |
 | Enter | Attach when running, resume when stopped. When it cannot be decided, ask which operation |
-| n | Focus the new-session prompt. The task text is typed; agent and directory carry defaults and are changed with ^a and ^d |
+| n | Focus the new-session prompt. The task text is typed; Tab picks the agent and Shift+Tab the directory |
 | / | Local search over title, path, and related number |
 | Tab | Switch grouping between execution state and work classification |
 | m | Change work classification |
@@ -92,7 +92,9 @@ This is a fictional example. Below the selected row, a short latest preview, the
 | r | Request an asynchronous refresh |
 | q | Leave the list. The effect on sessions follows the chosen runtime's behaviour, which is shown |
 
-The new-session prompt sits below the detail pane and is always on screen, showing the agent and directory a new session would use. Requiring only the task text is deliberate: naming an agent and a path every time was the slowest part of starting work, and both have reasonable defaults.
+The new-session prompt sits below the detail pane and is always on screen, showing the agent and directory a new session would use. Requiring only the task text is deliberate: naming an agent and a path every time was the slowest part of starting work, and both have reasonable defaults. Tab and Shift+Tab change them rather than a Ctrl chord, because Ctrl+A and Ctrl+D mean line-start and delete in a field holding prose.
+
+Starting differs by provider and is not smoothed over. A provider with a background start returns an identity and the row appears at once. A provider that only starts interactively is given the terminal, and its conversation joins the list at the next discovery; no identity is invented for a session that does not have one yet.
 
 These keys apply only while the list owns the terminal. While an official CLI screen is open, that CLI's keys apply. The shared "back to the list" key is decided by the P0 results. It is not assumed that agnt can intercept keys while terminal ownership has been handed over.
 

@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use super::process::{find_in_path, version_of};
 use super::{
-    Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartRequest, StartResult, StopResult,
+    Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
 use crate::model::{
     Capabilities, Operation, Origin, Provider, Runtime, RuntimeState, Session, SessionKey, Support, text,
@@ -272,9 +272,7 @@ impl Adapter for CodexAdapter {
             preview: Support::unsupported(
                 "the rollout reader only reads the session_meta line; transcript reading is P2",
             ),
-            start: Support::unsupported(
-                "codex has no background start that returns an id; only an interactive session",
-            ),
+            start: Support::Supported,
             attach: Support::unsupported(APP_SERVER_REASON),
             resume: Support::Supported,
             stop: Support::unsupported(APP_SERVER_REASON),
@@ -323,11 +321,22 @@ impl Adapter for CodexAdapter {
         ))
     }
 
-    async fn start(&self, _req: StartRequest) -> Result<StartResult, AdapterError> {
-        Err(self.unsupported(
-            Operation::Start,
-            "codex has no background start that returns an id; only an interactive session",
-        ))
+    /// Codex only starts interactively, so the terminal is handed to it and
+    /// the new conversation is picked up by the next discovery. No identity is
+    /// invented in the meantime.
+    async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError> {
+        let bin = self.bin(Operation::Start)?;
+        let mut args = Vec::new();
+        if let Some(prompt) = req.prompt.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            args.push(prompt.to_string());
+        }
+        Ok(StartOutcome::Interactive(AttachPlan {
+            program: bin.to_path_buf(),
+            args,
+            cwd: Some(req.cwd),
+            note: "Codex starts interactively. Leave it when you are done and the session joins the list."
+                .into(),
+        }))
     }
 
     async fn attach(&self, _key: &SessionKey) -> Result<AttachPlan, AdapterError> {
@@ -498,6 +507,43 @@ mod tests {
     fn a_missing_codex_home_reads_as_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_history(&dir.path().join("nope")).is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_hands_over_the_terminal_with_the_prompt_and_cwd() {
+        let a = CodexAdapter::with_binary("/usr/bin/true");
+        let outcome = a
+            .start(StartRequest {
+                operation_id: "op".into(),
+                cwd: "/Users/me/src/api".into(),
+                prompt: Some("  fix the flaky test  ".into()),
+            })
+            .await
+            .unwrap();
+        match outcome {
+            StartOutcome::Interactive(plan) => {
+                assert_eq!(plan.args, vec!["fix the flaky test"]);
+                assert_eq!(plan.cwd.as_deref(), Some(Path::new("/Users/me/src/api")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_without_a_prompt_opens_an_empty_session() {
+        let a = CodexAdapter::with_binary("/usr/bin/true");
+        let outcome = a
+            .start(StartRequest {
+                operation_id: "op".into(),
+                cwd: "/tmp".into(),
+                prompt: None,
+            })
+            .await
+            .unwrap();
+        match outcome {
+            StartOutcome::Interactive(plan) => assert!(plan.args.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[tokio::test]

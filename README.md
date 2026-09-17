@@ -4,7 +4,7 @@
 
 One screen shows each session's short content, runtime state, work classification, working directory, and linked PR / issue. It starts from any directory, and aims to keep running work alive when you return to the list.
 
-Status: **early, but it runs against the real CLIs.** Claude sessions are listed, attached, resumed, and stopped through the official commands. Codex is listed and resumed; attaching to a running Codex session still needs the App Server work. See [Current state](#current-state).
+Status: **early, but it runs against the real CLIs.** Claude sessions are listed, started, attached, resumed, and stopped through the official commands. Codex sessions are listed, started, and resumed; attaching to a *running* Codex session still needs the App Server work. See [Current state](#current-state).
 
 ## Documents
 
@@ -42,10 +42,17 @@ To start a session, press `n` and type what it should do:
 
 ```
 > fix the flaky billing test_
-  Claude - ~/src/api                    ^a agent  ^d directory  Enter start  Esc cancel
+  Claude - ~/src/api                 Tab agent  S-Tab directory  Enter start  Esc cancel
 ```
 
-The task text is the only thing you have to type. The agent defaults to Claude and the directory to where agnt was started; `^a` and `^d` change them, and `^d` walks the directories already in the list, so starting work in a repo you can see takes two keystrokes instead of a typed path. Codex has no background start, so choosing it there says so rather than pretending.
+The task text is the only thing you have to type.
+
+- **`Tab` switches the agent**, Claude to Codex and back. The agent is shown on the line below the prompt, so what Enter will start is always visible.
+- **`S-Tab` walks the directories**: where agnt was started, then the selected row's, then every other directory in the list. Starting work in a repo you can already see takes a keystroke instead of a typed path.
+
+Plain `Tab` and `Shift+Tab` rather than Ctrl chords, because `Ctrl+A` and `Ctrl+D` mean line-start and delete to anyone typing prose, and this field holds prose.
+
+The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
 ### Keys in the list
 
@@ -53,7 +60,7 @@ The task text is the only thing you have to type. The agent defaults to Claude a
 | --- | --- |
 | `j` / `k`, arrows | Move |
 | `Enter` | Attach when running, resume when stopped, otherwise ask |
-| `n` | Focus the new-session prompt: type the task, Enter starts it |
+| `n` | Focus the new-session prompt: type the task, Enter starts it. `Tab` picks the agent, `S-Tab` the directory |
 | `/` | Search title, path, and link number |
 | `Tab` | Group by runtime state or by work classification |
 | `m` | Change work classification |
@@ -89,7 +96,7 @@ Delete `$AGNT_DATA_DIR` to start over.
 | List, grouping, search, dialogs, terminal hand-off | Implemented |
 | CLI subcommands | Implemented |
 | Claude adapter | Real: discover, observe, attach, resume, stop, start |
-| Codex adapter | Discover and resume; attach, observe, and stop need the App Server |
+| Codex adapter | Discover, resume, and start interactively; attach, observe, and stop need the App Server |
 | GitHub enrichment | `gh` detection only; branch to PR candidates are P2 |
 
 Claude runs on the official CLI: `claude agents --json` for the list, `claude attach <id>` to attach, plus `stop`, `--resume`, and `--bg`. Codex has no scriptable listing — `codex agents` is itself a TUI — so its past conversations come from a declared read-only reader over `~/.codex/sessions`. A file proves a conversation existed, never that it is running, so every Codex row is Unknown until the App Server work lands.

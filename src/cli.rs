@@ -305,9 +305,22 @@ async fn new_session(
         prompt,
     };
     match adapter.start(req).await {
-        Ok(res) => {
+        Ok(providers::StartOutcome::Started(res)) => {
             println!("started: {}", res.key);
             Ok(ExitCode::SUCCESS)
+        }
+        // Codex only starts interactively: run it here with the terminal, the
+        // same as `agnt attach` does.
+        Ok(providers::StartOutcome::Interactive(plan)) => {
+            if !plan.note.is_empty() {
+                eprintln!("{}", plan.note);
+            }
+            let status = terminal::run_plan(&plan).await?;
+            Ok(if status.success() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
         Err(e) => unsupported_or_fail(e),
     }

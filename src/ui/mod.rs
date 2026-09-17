@@ -58,7 +58,7 @@ fn draw_compose(frame: &mut Frame, area: Rect, app: &App) {
 
     let target = format!("  {} - {}", provider.label(), short_path(&cwd));
     let hint = if focused {
-        "^a agent  ^d directory  Enter start  Esc cancel"
+        "Tab agent  S-Tab directory  Enter start  Esc cancel"
     } else {
         ""
     };
