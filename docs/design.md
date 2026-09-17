@@ -102,7 +102,17 @@ What counts as history is decided by state **and** origin: a session that has st
 
 Repositories are ordered by what is in them — the one holding something that needs you first, then by most recent activity — because alphabetical order buries the repositories being worked in. Within a group the order is the state order above, so saved history sinks to the bottom.
 
-These are fictional examples. Below the selected row, a short latest preview, the absolute path, and the last observation time are shown. State is never conveyed by colour alone: every state carries a glyph and, in the card view, its name in words.
+These are fictional examples. State is never conveyed by colour alone: every state carries a glyph and, in the card view, its name in words.
+
+**A session's details belong to its own row, not to a pane.** The selected row expands in place to show its absolute path, its classification and its short id — and its latest preview once a provider can supply one:
+
+```
+> ● claude-code-action auth subscription                      issue #880
+    Claude · Needs input · reed · 34d
+      /Users/me/src/reed  ·  unclassified  ·  5175105c
+```
+
+A separate detail pane was built first and dropped. It cost four rows permanently to repeat the state, the repository and the links already on the card, and it put those details four rows from the cursor. Because only the selected row expands, the list keeps its height as the cursor moves: the row being left shrinks by exactly what the row being entered grows by.
 
 | Key in the list | Operation |
 | --- | --- |

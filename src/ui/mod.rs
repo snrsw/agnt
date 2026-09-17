@@ -34,10 +34,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let status_h = 1 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
 
-    let [header, body, detail, compose, status] = Layout::vertical([
+    // No detail pane: a session's details belong on its own row, where the
+    // cursor already is. The selected row carries them and the others do not,
+    // so the list keeps its height as the cursor moves — the row being left
+    // shrinks by exactly what the row being entered grows by.
+    let [header, body, compose, status] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(3),
-        Constraint::Length(4),
         Constraint::Length(compose_h),
         Constraint::Length(status_h),
     ])
@@ -45,7 +48,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, header, app);
     draw_table(frame, body, app);
-    draw_detail(frame, detail, app);
     draw_compose(frame, compose, app);
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
@@ -211,6 +213,33 @@ fn state_style(state: RuntimeState) -> Style {
     }
 }
 
+/// The extra lines the selected row shows: where it is, how it is filed, and
+/// its short id — the things the card's own two lines leave out. Dim, so an
+/// expanded row does not shout over the list around it.
+fn detail_lines(v: &SessionView, width: usize, indent: usize) -> Vec<Line<'static>> {
+    let pad = " ".repeat(indent);
+    let mut out = Vec::new();
+
+    if let Some(preview) = v.session.preview.as_deref().filter(|p| !p.trim().is_empty()) {
+        out.push(Line::styled(
+            text::truncate_to_width(&format!("{pad}{}", text::sanitize(preview)), width),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
+
+    let mut facts = v.session.cwd.to_string_lossy().into_owned();
+    facts.push_str(&format!("  ·  {}", v.workflow().label().to_lowercase()));
+    facts.push_str(&format!("  ·  {}", v.key().short_id()));
+    if v.is_hidden() {
+        facts.push_str("  ·  hidden");
+    }
+    out.push(Line::styled(
+        text::truncate_to_width(&format!("{pad}{}", text::sanitize(&facts)), width),
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+    out
+}
+
 /// A session as two lines: the task, then everything that qualifies it.
 /// Used by the status and workflow views.
 fn card_lines(
@@ -267,14 +296,32 @@ fn card_lines(
     } else {
         Style::default().add_modifier(Modifier::DIM)
     };
-    vec![
+    let mut lines = vec![
         Line::from(first),
         Line::styled(text::truncate_to_width(&second, width), meta_style),
-    ]
+    ];
+    if selected {
+        lines.extend(detail_lines(v, width, W_GLYPH + 2));
+    }
+    lines
 }
 
 /// A session as one line under a repository heading. The repository is already
 /// on the group row, so the branch is what tells two rows apart.
+fn compact_lines(
+    v: &SessionView,
+    width: usize,
+    now: DateTime<Utc>,
+    suffix: &str,
+    selected: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![compact_line(v, width, now, suffix)];
+    if selected {
+        lines.extend(detail_lines(v, width, W_GLYPH + 2));
+    }
+    lines
+}
+
 fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str) -> Line<'static> {
     let age = v.age(now).unwrap_or_default();
     let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
@@ -392,7 +439,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 let item = if app.view.is_cards() {
                     ListItem::new(card_lines(v, total, now, selected, &suffix))
                 } else {
-                    ListItem::new(compact_line(v, total, now, &suffix))
+                    ListItem::new(compact_lines(v, total, now, &suffix, selected))
                 };
                 item.style(style)
             }
@@ -405,62 +452,6 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(selected_index);
     frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// What the selected session is, in plain words. The provider's raw evidence
-/// string belongs in `agnt doctor` and `agnt list --json`, not here: the thing
-/// worth knowing on screen is when it was last seen, not which command said so.
-fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::TOP);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let Some(v) = app.selected_view() else {
-        return;
-    };
-    let width = inner.width as usize;
-    let now = Utc::now();
-
-    let lead = match v.session.preview.as_deref() {
-        Some(_) => v.preview(),
-        None => "No preview yet.".to_string(),
-    };
-
-    let mut place = v.session.cwd.to_string_lossy().into_owned();
-    if let Some(b) = v.branch_or_worktree() {
-        place.push_str(&format!("  [{b}]"));
-    }
-    let links = links_text(&v);
-    if !links.is_empty() {
-        place.push_str(&format!("  {links}"));
-    }
-    if v.is_hidden() {
-        place.push_str("  (hidden)");
-    }
-
-    let seen = match v.age(now) {
-        Some(age) => format!("last seen {age} ago"),
-        None => "not seen yet".to_string(),
-    };
-    let facts = format!(
-        "{} · {} · {} · {}",
-        v.state_label(),
-        seen,
-        v.workflow().label().to_lowercase(),
-        v.key().short_id(),
-    );
-
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(text::truncate_to_width(&lead, width)),
-            Line::from(text::truncate_to_width(&text::sanitize(&place), width)),
-            Line::styled(
-                text::truncate_to_width(&facts, width),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-        ]),
-        inner,
-    );
 }
 
 /// One line of keys for what you are doing now, and nothing else unless
@@ -713,10 +704,10 @@ mod tests {
         assert!(second > first + 1, "{out}");
     }
 
-    /// The panes below the list are each fenced off by a rule, so the detail
-    /// and the new-session prompt do not read as one block.
+    /// The prompt is fenced off by a rule, so it does not read as another
+    /// row of the list.
     #[test]
-    fn the_compose_bar_is_ruled_off_from_the_detail_pane() {
+    fn the_compose_bar_is_ruled_off_from_the_list() {
         let dir = tempfile::tempdir().unwrap();
         let app = app_with(
             &dir,
@@ -774,6 +765,68 @@ mod tests {
         assert!(has(&out, "Delete (hide)"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
+    }
+
+    /// Details belong to the row the cursor is on, not to a pane four rows
+    /// away. Only the selected row carries them.
+    #[test]
+    fn only_the_selected_row_shows_its_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
+        let out = render(&app, 120, 24);
+
+        // The full path is on the selected row and nowhere else.
+        assert_eq!(
+            out.lines().filter(|l| l.contains("/Users/me/src/api")).count(),
+            1,
+            "{out}"
+        );
+        // It sits directly under the selected card, not at the bottom.
+        let title = out
+            .lines()
+            .position(|l| l.contains("Fix the auth handler"))
+            .unwrap();
+        let detail = out.lines().position(|l| l.contains("/Users/me/src/api")).unwrap();
+        assert_eq!(detail, title + 2, "{out}");
+    }
+
+    /// Moving the cursor must not shuffle the list: the row being left shrinks
+    /// by exactly what the row being entered grows by.
+    #[test]
+    fn the_list_keeps_its_height_as_the_cursor_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![
+                session("a", "First", RuntimeState::Idle),
+                session("b", "Second", RuntimeState::Idle),
+                session("c", "Third", RuntimeState::Idle),
+            ],
+        );
+
+        let filled = |app: &App| {
+            render(app, 120, 30)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+        };
+
+        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
+        let with_first = filled(&app);
+        app.selected = Some(SessionKey::new(Provider::Claude, "b"));
+        let with_second = filled(&app);
+        app.selected = Some(SessionKey::new(Provider::Claude, "c"));
+        let with_third = filled(&app);
+
+        assert_eq!(with_first, with_second);
+        assert_eq!(with_second, with_third);
     }
 
     /// A long task must stay readable rather than being clipped to one line.
