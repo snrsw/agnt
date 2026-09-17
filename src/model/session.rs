@@ -285,6 +285,23 @@ impl SessionView {
         self.session.runtime.state
     }
 
+    /// True for rows that are archaeology rather than work, which the list
+    /// folds away by default.
+    ///
+    /// Unknown alone is not enough. It means both "a conversation that only
+    /// exists as a saved file" and "not observed yet" — and every row loaded
+    /// from the cache before the first refresh is the second kind. Folding on
+    /// the state alone empties the list on a cold start, so the origin decides:
+    /// a session the provider still lists stays visible even while its state
+    /// is unconfirmed.
+    pub fn is_history(&self) -> bool {
+        match self.state() {
+            RuntimeState::Stopped => true,
+            RuntimeState::Unknown => self.session.origin == Origin::History,
+            _ => false,
+        }
+    }
+
     /// Repository this session's directory belongs to.
     pub fn repo(&self) -> String {
         repo_and_worktree(&self.session.cwd).0

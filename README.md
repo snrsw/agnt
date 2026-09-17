@@ -76,6 +76,14 @@ The two agents start differently, and the difference is visible rather than smoo
 
 Repositories are ordered by what is in them, not by name. A third turn of `Tab` gives the cards grouped by your own classification instead of by state.
 
+**Stopped sessions and saved history are folded away**, because they outnumber live work heavily — 50 of 56 rows on the machine this was built on. Their headings stay, marked `▸` and carrying their counts, and `z` brings them back:
+
+```
+▸ gh-own (16)                                       ● 0  ◐ 0  ○ 0  · 16
+```
+
+A row is history when it has stopped, or when it exists only as a saved file. A session the provider still lists stays visible even while its state is unconfirmed — otherwise the list would be empty on every cold start, since nothing is confirmed until the first refresh answers.
+
 ### Keys in the list
 
 | Key | Action |
@@ -89,6 +97,7 @@ Repositories are ordered by what is in them, not by name. A third turn of `Tab` 
 | `l` | Register a PR / issue URL |
 | `d` | Hide dialog; hide a running session or stop it first. On a hidden row, restore it |
 | `r` | Request a refresh |
+| `z` | Show stopped sessions and saved history, folded away by default |
 | `H` | Show hidden sessions |
 | `q` | Leave the list |
 

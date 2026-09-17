@@ -96,6 +96,10 @@ The list has two shapes, because it answers two different questions, and Tab mov
 
 A third turn of Tab gives the same cards grouped by the classification the user set, which is how R04's manual axis is reached.
 
+Stopped sessions and saved history are folded away by default and brought back with `z`. This is a scale decision rather than a taste one: on the machine this was built against, 50 of 56 rows were saved Codex conversations, some of them 200 days old, and a two-line card each buried the six live sessions under a hundred lines. A folded group keeps its heading, marked `▸`, and its heading still tallies what is inside it, so nothing is silently missing.
+
+What counts as history is decided by state **and** origin: a session that has stopped, or one that exists only as a saved file. Unknown alone will not do, because every row loaded from the cache is Unknown until the first refresh answers — folding on the state alone empties the list on a cold start.
+
 Repositories are ordered by what is in them — the one holding something that needs you first, then by most recent activity — because alphabetical order buries the repositories being worked in. Within a group the order is the state order above, so saved history sinks to the bottom.
 
 These are fictional examples. Below the selected row, a short latest preview, the absolute path, and the last observation time are shown. State is never conveyed by colour alone: every state carries a glyph and, in the card view, its name in words.
@@ -110,6 +114,7 @@ These are fictional examples. Below the selected row, a short latest preview, th
 | m | Change work classification |
 | l | Register or edit a PR / issue URL |
 | d | Delete dialog. When running, choose between continuing and hiding, or stopping then hiding |
+| z | Show stopped sessions and saved history, which are folded away by default |
 | r | Request an asynchronous refresh |
 | q | Leave the list. The effect on sessions follows the chosen runtime's behaviour, which is shown |
 

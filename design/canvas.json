@@ -16,7 +16,7 @@
       "x": 780,
       "y": -230,
       "w": 620,
-      "text": "Where the build departed from these drawings:\n\n· repositories sort by what is in them, not by name\n· no per-repository collapse yet — history sinks to the bottom instead\n· no quoted last message until a transcript source exists"
+      "text": "Where the build departed from these drawings:\n\n· repositories sort by what is in them, not by name\n· history folds away by default; z brings it back\n· no quoted last message until a transcript source exists"
     }
   ],
   "launch": { "view": "canvas" }

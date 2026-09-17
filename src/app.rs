@@ -135,6 +135,8 @@ pub struct GroupHeader {
     pub running: usize,
     pub idle: usize,
     pub resting: usize,
+    /// True when every member is folded away, so the heading stands alone.
+    pub collapsed: bool,
 }
 
 impl GroupHeader {
@@ -173,6 +175,9 @@ pub struct App {
     pub view: View,
     pub query: String,
     pub show_hidden: bool,
+    /// Whether stopped sessions and saved history are listed. Off by default:
+    /// they outnumber live work heavily, and `z` brings them back.
+    pub show_history: bool,
     pub selected: Option<SessionKey>,
     pub mode: Mode,
     pub refreshing: bool,
@@ -215,6 +220,7 @@ impl App {
             view: View::default(),
             query: String::new(),
             show_hidden: false,
+            show_history: false,
             selected: None,
             mode: Mode::Normal,
             refreshing: false,
@@ -313,10 +319,35 @@ impl App {
 
         let mut rows = Vec::new();
         for (label, members) in groups {
-            rows.push(ListRow::Group(GroupHeader::tally(label, &members)));
-            rows.extend(members.into_iter().map(|v| ListRow::Session(Box::new(v))));
+            // The heading tallies every member, folded or not, so a collapsed
+            // group still says how much is inside it.
+            let mut header = GroupHeader::tally(label, &members);
+            let shown: Vec<SessionView> = if self.show_history {
+                members
+            } else {
+                members.into_iter().filter(|v| !v.is_history()).collect()
+            };
+            header.collapsed = shown.is_empty();
+            rows.push(ListRow::Group(header));
+            rows.extend(shown.into_iter().map(|v| ListRow::Session(Box::new(v))));
         }
         rows
+    }
+
+    /// Sessions currently listed, and how many are folded away behind `z`.
+    pub fn shown_and_folded(&self) -> (usize, usize) {
+        let visible: Vec<SessionView> = self
+            .views()
+            .into_iter()
+            .filter(|v| self.show_hidden || !v.is_hidden())
+            .filter(|v| v.matches_query(&self.query))
+            .collect();
+        let folded = if self.show_history {
+            0
+        } else {
+            visible.iter().filter(|v| v.is_history()).count()
+        };
+        (visible.len() - folded, folded)
     }
 
     fn group_label(&self, v: &SessionView) -> String {
@@ -782,6 +813,10 @@ impl App {
                 self.show_hidden = !self.show_hidden;
                 self.ensure_selection();
             }
+            KeyCode::Char('z') => {
+                self.show_history = !self.show_history;
+                self.ensure_selection();
+            }
             KeyCode::Enter => {
                 if let Some(v) = self.selected_view() {
                     let k = v.session.key.clone();
@@ -1129,9 +1164,13 @@ mod tests {
         KeyEvent::new(c, KeyModifiers::NONE)
     }
 
+    /// A session as discovery produces one. `Origin::Discovered` matters:
+    /// a session the provider still lists is not history even when its state
+    /// is Unknown, and the list folds on that distinction.
     fn session(provider: Provider, id: &str, state: RuntimeState) -> Session {
         let mut s = Session::new(SessionKey::new(provider, id), "/tmp/proj");
         s.runtime = Runtime::observed(state, "test", Utc::now());
+        s.origin = Origin::Discovered;
         s
     }
 
@@ -1405,10 +1444,94 @@ mod tests {
         assert!(matches!(&rows[3], ListRow::Group(h) if h.label == "Idle" && h.count == 1));
     }
 
+    fn at_codex(id: &str, cwd: &std::path::Path) -> Session {
+        let mut s = Session::new(SessionKey::new(Provider::Codex, id), cwd);
+        s.runtime = Runtime::observed(RuntimeState::Idle, "test", Utc::now());
+        s.origin = Origin::Discovered;
+        s
+    }
+
     fn at(cwd: &str, id: &str, state: RuntimeState) -> Session {
         let mut s = Session::new(SessionKey::new(Provider::Claude, id), cwd);
         s.runtime = Runtime::observed(state, "test", Utc::now());
+        s.origin = Origin::Discovered;
         s
+    }
+
+    fn history_row(cwd: &str, id: &str) -> Session {
+        let mut s = Session::new(SessionKey::new(Provider::Codex, id), cwd);
+        s.runtime = Runtime::observed(RuntimeState::Unknown, "rollout file", Utc::now());
+        s.origin = Origin::History;
+        s
+    }
+
+    /// Saved history outnumbers live work heavily, so it is folded away and
+    /// its heading still says how much is behind it.
+    #[test]
+    fn history_is_folded_until_z() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "live", RuntimeState::WaitingApproval),
+                    at("/Users/me/src/reed", "done", RuntimeState::Stopped),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        app.apply_discovery(
+            Provider::Codex,
+            Ok(Discovery {
+                sessions: vec![
+                    history_row("/Users/me/src/reed", "old1"),
+                    history_row("/Users/me/src/reed", "old2"),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+
+        assert_eq!(app.shown_and_folded(), (1, 3));
+        assert_eq!(app.session_keys_in_order().len(), 1);
+
+        // The folded groups still appear, marked and counted.
+        let folded: Vec<GroupHeader> = app
+            .rows()
+            .into_iter()
+            .filter_map(|r| match r {
+                ListRow::Group(h) if h.collapsed => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(folded.len(), 2);
+        assert_eq!(folded.iter().map(|h| h.count).sum::<usize>(), 3);
+
+        app.handle_key(key('z'));
+        assert_eq!(app.shown_and_folded(), (4, 0));
+        assert_eq!(app.session_keys_in_order().len(), 4);
+    }
+
+    /// The bug this nearly shipped with: every row loaded from the cache is
+    /// Unknown until the first refresh answers, so folding on the state alone
+    /// empties the list on a cold start.
+    #[test]
+    fn cached_rows_are_not_mistaken_for_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![
+                session(Provider::Claude, "a", RuntimeState::Running),
+                session(Provider::Claude, "b", RuntimeState::Idle),
+            ],
+        );
+        // Loading marks them stale, so both read Unknown.
+        assert!(app.views().iter().all(|v| v.state() == RuntimeState::Unknown));
+        // They are still listed: the provider had them, so they are not history.
+        assert_eq!(app.shown_and_folded(), (2, 0));
+        assert_eq!(app.session_keys_in_order().len(), 2);
     }
 
     /// Tab moves between the two views the list is built around, plus the
@@ -1606,7 +1729,7 @@ mod tests {
         app.apply_discovery(
             Provider::Codex,
             Ok(Discovery {
-                sessions: vec![Session::new(SessionKey::new(Provider::Codex, "c1"), &other)],
+                sessions: vec![at_codex("c1", &other)],
                 scope_note: "test".into(),
                 complete: true,
             }),
@@ -1709,8 +1832,8 @@ mod tests {
             Provider::Claude,
             Ok(Discovery {
                 sessions: vec![
-                    Session::new(SessionKey::new(Provider::Claude, "a"), &repo),
-                    Session::new(SessionKey::new(Provider::Claude, "b"), &repo),
+                    at(repo.to_str().unwrap(), "a", RuntimeState::Idle),
+                    at(repo.to_str().unwrap(), "b", RuntimeState::Idle),
                 ],
                 scope_note: "test".into(),
                 complete: true,

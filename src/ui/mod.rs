@@ -10,7 +10,9 @@ use unicode_width::UnicodeWidthStr;
 use chrono::{DateTime, Utc};
 
 use crate::app::{App, GroupHeader, ListRow, Mode};
-use crate::model::{RuntimeState, SessionView, View, text};
+use std::collections::BTreeMap;
+
+use crate::model::{RuntimeState, SessionView, TitleSource, View, text};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -122,10 +124,21 @@ pub fn short_path(path: &std::path::Path) -> String {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let (shown, folded) = app.shown_and_folded();
     let mut spans = vec![
         Span::styled(" agnt ", Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(format!(" view: {} (Tab) ", app.view.label())),
+        Span::styled(
+            format!(" {shown} listed "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
     ];
+    if folded > 0 {
+        spans.push(Span::styled(
+            format!(" {folded} in history (z) "),
+            Style::default().add_modifier(Modifier::DIM),
+        ));
+    }
     if !app.query.is_empty() || app.mode == Mode::Search {
         spans.push(Span::raw(format!(" search: {}_ ", app.query)));
     }
@@ -138,13 +151,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Links as text, empty when there are none. A placeholder dash in a column
+/// that is usually empty reads as a typo rather than as "nothing here".
 fn links_text(v: &SessionView) -> String {
-    let labels: Vec<String> = v.links().iter().map(|l| l.short_label()).collect();
-    if labels.is_empty() {
-        "—".to_string()
-    } else {
-        labels.join(" · ")
-    }
+    v.links()
+        .iter()
+        .map(|l| l.short_label())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// Column widths in terminal cells.
@@ -160,7 +174,10 @@ const W_GLYPH: usize = 2;
 fn state_glyph(state: RuntimeState) -> &'static str {
     match state {
         RuntimeState::WaitingApproval | RuntimeState::WaitingInput => "●",
-        RuntimeState::Running | RuntimeState::Starting => "◐",
+        // `◐` is rare enough that terminals fall back to another font for it,
+        // which changes its advance width and shifts the whole row. `*` is in
+        // every font at exactly one cell, and reads as "busy".
+        RuntimeState::Running | RuntimeState::Starting => "*",
         RuntimeState::Idle => "○",
         RuntimeState::Stopped => "·",
         RuntimeState::Error => "!",
@@ -180,10 +197,25 @@ fn state_style(state: RuntimeState) -> Style {
 
 /// A session as two lines: the task, then everything that qualifies it.
 /// Used by the status and workflow views.
-fn card_lines(v: &SessionView, width: usize, now: DateTime<Utc>) -> Vec<Line<'static>> {
+fn card_lines(
+    v: &SessionView,
+    width: usize,
+    now: DateTime<Utc>,
+    selected: bool,
+    suffix: &str,
+) -> Vec<Line<'static>> {
     let links = links_text(v);
-    let links_w = if links == "—" { 0 } else { links.width() + 2 };
+    let links_w = if links.is_empty() { 0 } else { links.width() + 2 };
     let title_w = width.saturating_sub(W_GLYPH + links_w).max(4);
+
+    // A session with no name falls back to its id. An id is not a title, so it
+    // is not styled like one — bolding it draws the eye to the least
+    // informative rows in the list.
+    let (title, source) = v.title();
+    let title_style = match source {
+        TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
+        _ => Style::default().add_modifier(Modifier::BOLD),
+    };
 
     let mut first = vec![
         Span::styled(
@@ -191,8 +223,8 @@ fn card_lines(v: &SessionView, width: usize, now: DateTime<Utc>) -> Vec<Line<'st
             state_style(v.state()),
         ),
         Span::styled(
-            text::pad_to_width(&text::sanitize(&v.title().0), title_w),
-            Style::default().add_modifier(Modifier::BOLD),
+            text::pad_to_width(&format!("{}{suffix}", text::sanitize(&title)), title_w),
+            title_style,
         ),
     ];
     if links_w > 0 {
@@ -212,21 +244,30 @@ fn card_lines(v: &SessionView, width: usize, now: DateTime<Utc>) -> Vec<Line<'st
     }
     let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
 
+    // Dim on top of the selection's reversed colours is close to unreadable,
+    // so the selected card's second line keeps full contrast.
+    let meta_style = if selected {
+        Style::default()
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
     vec![
         Line::from(first),
-        Line::styled(
-            text::truncate_to_width(&second, width),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Line::styled(text::truncate_to_width(&second, width), meta_style),
     ]
 }
 
 /// A session as one line under a repository heading. The repository is already
 /// on the group row, so the branch is what tells two rows apart.
-fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>) -> Line<'static> {
+fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str) -> Line<'static> {
     let age = v.age(now).unwrap_or_default();
     let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
     let title_w = width.saturating_sub(fixed).max(4);
+    let (title, source) = v.title();
+    let title_style = match source {
+        TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
+        _ => Style::default(),
+    };
 
     Line::from(vec![
         Span::styled(
@@ -235,7 +276,10 @@ fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>) -> Line<'stat
         ),
         Span::raw(text::pad_to_width(v.session.provider().label(), W_AGENT)),
         Span::raw(" "),
-        Span::raw(text::pad_to_width(&text::sanitize(&v.title().0), title_w)),
+        Span::styled(
+            text::pad_to_width(&format!("{}{suffix}", text::sanitize(&title)), title_w),
+            title_style,
+        ),
         Span::raw(" "),
         Span::styled(
             text::pad_to_width(&v.branch_or_worktree().unwrap_or_default(), W_BRANCH),
@@ -253,7 +297,9 @@ fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>) -> Line<'stat
 /// A group heading. In the repository view it carries the tally, which is what
 /// lets a repo say what is inside it without being expanded.
 fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
-    let left = format!("── {} ({}) ", h.label, h.count);
+    // A folded group announces itself, so nothing is silently missing.
+    let marker = if h.collapsed { "▸" } else { "──" };
+    let left = format!("{marker} {} ({}) ", h.label, h.count);
     if view != View::Repository {
         return Line::styled(
             text::truncate_to_width(&left, width),
@@ -288,6 +334,16 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     let now = Utc::now();
     let mut selected_index = None;
 
+    // Two conversations can honestly share a name — a fork, or a rename that
+    // kept both rollouts. Showing the id only on the ones that collide keeps
+    // them apart without putting an id on every row.
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &rows {
+        if let ListRow::Session(v) = row {
+            *seen.entry(v.title().0).or_default() += 1;
+        }
+    }
+
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -303,17 +359,24 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 }
             }
             ListRow::Session(v) => {
-                if app.selected.as_ref() == Some(v.key()) {
+                let selected = app.selected.as_ref() == Some(v.key());
+                if selected {
                     selected_index = Some(i);
                 }
+                let (title, source) = v.title();
+                let suffix = if source != TitleSource::ShortId && seen.get(&title).copied().unwrap_or(0) > 1 {
+                    format!("  {}", v.key().short_id())
+                } else {
+                    String::new()
+                };
                 let mut style = Style::default();
                 if v.is_hidden() {
                     style = style.add_modifier(Modifier::DIM);
                 }
                 let item = if app.view.is_cards() {
-                    ListItem::new(card_lines(v, total, now))
+                    ListItem::new(card_lines(v, total, now, selected, &suffix))
                 } else {
-                    ListItem::new(compact_line(v, total, now))
+                    ListItem::new(compact_line(v, total, now, &suffix))
                 };
                 item.style(style)
             }
@@ -337,35 +400,54 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let width = inner.width as usize;
-    let preview = text::truncate_to_width(&v.preview(), width);
+    // The top line is the most prominent in the pane, so it carries the
+    // preview when there is one and the evidence when there is not, rather
+    // than spending itself on the words "no content".
+    let has_preview = v.session.preview.is_some();
+    let lead = if has_preview {
+        v.preview()
+    } else {
+        text::sanitize(&v.session.runtime.evidence)
+    };
     let mut place = v.session.cwd.to_string_lossy().into_owned();
     if let Some(b) = v.branch_or_worktree() {
         place.push_str(&format!("  [{b}]"));
     }
-    place.push_str(&format!("  {}", links_text(&v)));
+    let links = links_text(&v);
+    if !links.is_empty() {
+        place.push_str(&format!("  {links}"));
+    }
     if v.is_hidden() {
         place.push_str("  (hidden)");
     }
+    // The evidence is only repeated here when the top line did not take it.
+    let evidence = if has_preview {
+        format!("  evidence: {}", text::sanitize(&v.session.runtime.evidence))
+    } else {
+        String::new()
+    };
     let observed = match v.session.runtime.observed_at {
         Some(t) => format!(
-            "last observed {}  evidence: {}  class: {}  origin: {}  id: {}",
+            "last observed {}{evidence}  class: {}  origin: {}  id: {}",
             t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S"),
-            text::sanitize(&v.session.runtime.evidence),
             v.workflow().label(),
             v.session.origin.as_str(),
             v.key().qualified(),
         ),
         None => format!(
-            "last observed: never  class: {}  origin: {}  id: {}",
+            "last observed: never{evidence}  class: {}  origin: {}  id: {}",
             v.workflow().label(),
             v.session.origin.as_str(),
             v.key().qualified()
         ),
     };
     let lines = vec![
-        Line::from(preview),
+        Line::from(text::truncate_to_width(&lead, width)),
         Line::from(text::truncate_to_width(&text::sanitize(&place), width)),
-        Line::from(text::truncate_to_width(&observed, width)),
+        Line::styled(
+            text::truncate_to_width(&observed, width),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
     ];
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -396,7 +478,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
     lines.push(Line::from(text::truncate_to_width(
-        "j/k move  Enter attach/resume  n new  / search  Tab view  m class  l link  d delete  r refresh  H hidden  q quit",
+        "j/k move  Enter attach/resume  n new  / search  Tab view  z history  m class  l link  d delete  r refresh  H hidden  q quit",
         width,
     )));
     frame.render_widget(
@@ -487,6 +569,8 @@ mod tests {
         let mut s = Session::new(SessionKey::new(Provider::Claude, id), "/Users/me/src/api");
         s.title = Some(title.to_string());
         s.runtime = Runtime::observed(state, "test", chrono::Utc::now());
+        // Discovered, not history: the list folds history away by default.
+        s.origin = crate::model::Origin::Discovered;
         s.links
             .push(Link::from_url("https://github.com/o/api/pull/123", LinkSource::Provider).unwrap());
         s
