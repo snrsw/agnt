@@ -79,9 +79,7 @@ fn main() {
             "repository view" => app.view = agnt::model::View::Repository,
             "composing" => {
                 app.view = agnt::model::View::Status;
-                let mut draft = agnt::app::NewSession::new(agnt::model::Provider::Claude);
-                draft.buffer = "fix the flaky billing test".into();
-                app.mode = agnt::app::Mode::NewInput(draft);
+                app.draft.buffer = "fix the flaky billing test".into();
             }
             _ => {}
         }

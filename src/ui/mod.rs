@@ -37,50 +37,39 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_dialog(frame, area, app);
 }
 
-/// The new-session bar, always on screen so starting work never needs a
-/// remembered command. Typing is the only required step: the agent and the
-/// directory carry defaults and are shown next to the prompt.
+/// The new-session prompt. It is always live — typing anywhere in the list
+/// lands here — so it is drawn as an active field rather than as a hint.
 fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
     let block = Block::default().borders(Borders::TOP);
     let area = block.inner(outer);
     let width = area.width as usize;
-    let focused = matches!(app.mode, Mode::NewInput(_));
 
-    let (typed, provider, cwd) = match &app.mode {
-        Mode::NewInput(draft) => (draft.buffer.clone(), draft.provider, app.new_session_cwd(draft)),
-        _ => {
-            let draft = crate::app::NewSession::new(crate::model::Provider::Claude);
-            (String::new(), draft.provider, app.new_session_cwd(&draft))
-        }
-    };
+    let typed = &app.draft.buffer;
+    let cwd = app.new_session_cwd(&app.draft);
 
-    let prompt = if focused {
-        format!("> {typed}_")
-    } else if typed.is_empty() {
-        "> Describe a task for a new session  (n)".to_string()
+    let prompt = if typed.is_empty() {
+        Line::from(vec![
+            Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(
+                "Describe a task for a new session",
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        ])
     } else {
-        format!("> {typed}")
+        Line::from(vec![
+            Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
+            Span::raw(text::truncate_to_width(typed, width.saturating_sub(3))),
+            Span::raw("_"),
+        ])
     };
 
-    let target = format!("  {} - {}", provider.label(), short_path(&cwd));
-    let hint = if focused {
-        "Tab agent  S-Tab directory  Enter start  Esc cancel"
-    } else {
-        ""
-    };
-    let gap = width.saturating_sub(target.width()).saturating_sub(hint.width());
-    let second = format!("{target}{}{hint}", " ".repeat(gap));
-
-    let mut prompt_style = Style::default();
-    if !focused {
-        prompt_style = prompt_style.add_modifier(Modifier::DIM);
-    }
+    let target = format!("  {} - {}", app.draft.provider.label(), short_path(&cwd));
     frame.render_widget(block, outer);
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(text::truncate_to_width(&prompt, width), prompt_style),
+            prompt,
             Line::styled(
-                text::truncate_to_width(&second, width),
+                text::truncate_to_width(&target, width),
                 Style::default().add_modifier(Modifier::DIM),
             ),
         ]),
@@ -127,7 +116,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let (shown, folded) = app.shown_and_folded();
     let mut spans = vec![
         Span::styled(" agnt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" view: {} (Tab) ", app.view.label())),
+        Span::raw(format!(" view: {} ", app.view.label())),
         Span::styled(
             format!(" {shown} listed "),
             Style::default().add_modifier(Modifier::DIM),
@@ -452,9 +441,12 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Provider state, then one short line of keys for what you are doing now.
+/// The full set lives behind `?` rather than across the bottom of the screen.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
     let mut lines = Vec::new();
+
     let providers: Vec<String> = crate::model::Provider::ALL
         .iter()
         .map(|p| match app.provider_status.get(p) {
@@ -471,16 +463,21 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         &providers.join("  |  "),
         width,
     )));
+
     if let Some(err) = &app.metadata_error {
         lines.push(Line::from(text::truncate_to_width(
             &format!("metadata editing disabled: {}", text::sanitize(err)),
             width,
         )));
     }
-    lines.push(Line::from(text::truncate_to_width(
-        "j/k move  Enter attach/resume  n new  / search  Tab view  z history  m class  l link  d delete  r refresh  H hidden  q quit",
-        width,
-    )));
+
+    let hint = if !app.draft.buffer.trim().is_empty() {
+        "enter to start · tab for agent · esc to clear"
+    } else {
+        "type to start a session · enter to attach · ctrl+t view · ? for shortcuts"
+    };
+    lines.push(Line::from(text::truncate_to_width(hint, width)));
+
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().add_modifier(Modifier::DIM)),
         area,
@@ -505,8 +502,32 @@ fn centered(area: Rect, width_pct: u16, height: u16) -> Rect {
 
 fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
     let (title, body): (&str, Vec<String>) = match &app.mode {
-        // Normal, Search, and NewInput are drawn inline, not as a dialog.
-        Mode::Normal | Mode::Search | Mode::NewInput(_) => return,
+        // The list, the search line and the prompt are drawn inline.
+        Mode::Normal | Mode::Search => return,
+        Mode::Shortcuts => (
+            "Shortcuts",
+            vec![
+                "type            write a task for a new session".into(),
+                "enter           start it, or attach to the selected row when the prompt is empty".into(),
+                "up / down       move".into(),
+                "tab / s-tab     the new session's agent / directory".into(),
+                "".into(),
+                "ctrl+t          cycle view: status, repository, workflow".into(),
+                "ctrl+f          search".into(),
+                "ctrl+o          show stopped sessions and saved history".into(),
+                "ctrl+y          show hidden rows".into(),
+                "ctrl+r          refresh".into(),
+                "".into(),
+                "ctrl+x          hide the selected row, or restore it".into(),
+                "ctrl+g          change its classification".into(),
+                "ctrl+l          attach a PR or issue URL to it".into(),
+                "".into(),
+                "ctrl+u / ctrl+w clear the prompt / delete a word".into(),
+                "ctrl+c          quit. Sessions keep running; see docs/design.md §7".into(),
+                "".into(),
+                "any key closes this".into(),
+            ],
+        ),
         Mode::LinkInput { key, buffer } => (
             "Register a PR / issue URL",
             vec![

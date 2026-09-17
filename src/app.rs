@@ -58,12 +58,17 @@ pub struct ProviderStatus {
     pub at: DateTime<Utc>,
 }
 
+/// What is taking keystrokes other than the always-live new-session prompt.
+///
+/// The prompt is not a mode: typing anywhere goes into it, after the agent
+/// view this is modelled on. Everything here is an overlay that borrows the
+/// keyboard until it is dismissed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Search,
-    /// The new-session prompt has focus. The bar itself is always drawn.
-    NewInput(NewSession),
+    /// The full key list, opened with `?` on an empty prompt.
+    Shortcuts,
     LinkInput {
         key: SessionKey,
         buffer: String,
@@ -188,6 +193,8 @@ pub struct App {
     preview_requested: BTreeSet<SessionKey>,
     /// Where agnt was started. The first directory a new session is offered.
     launch_cwd: PathBuf,
+    /// The new-session prompt, always live. Typing goes here.
+    pub draft: NewSession,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -228,6 +235,7 @@ impl App {
             should_quit: false,
             preview_requested: BTreeSet::new(),
             launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            draft: NewSession::new(Provider::Claude),
             store,
             cache,
         };
@@ -660,13 +668,18 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
             self.should_quit = true;
             return vec![Effect::Quit];
         }
         let mode = self.mode.clone();
         match mode {
             Mode::Normal => self.handle_normal(key),
+            Mode::Shortcuts => {
+                self.mode = Mode::Normal;
+                Vec::new()
+            }
             Mode::Search => {
                 match key.code {
                     KeyCode::Esc => {
@@ -677,44 +690,11 @@ impl App {
                     KeyCode::Backspace => {
                         self.query.pop();
                     }
-                    KeyCode::Char(c) => self.query.push(c),
+                    KeyCode::Char('u') if ctrl => self.query.clear(),
+                    KeyCode::Char(c) if !ctrl => self.query.push(c),
                     _ => {}
                 }
                 self.ensure_selection();
-                Vec::new()
-            }
-            Mode::NewInput(mut draft) => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                match key.code {
-                    KeyCode::Esc => {
-                        self.mode = Mode::Normal;
-                        return Vec::new();
-                    }
-                    KeyCode::Enter => {
-                        return self.submit_new_session(&draft);
-                    }
-                    // Tab cycles the agent and Shift+Tab the directory, so
-                    // neither is typed to start somewhere other than the
-                    // default. Tab is used rather than a Ctrl chord because
-                    // Ctrl+A and Ctrl+D mean line-start and delete in a text
-                    // field, and this field holds ordinary prose.
-                    KeyCode::Tab => {
-                        draft.provider = match draft.provider {
-                            Provider::Claude => Provider::Codex,
-                            Provider::Codex => Provider::Claude,
-                        };
-                    }
-                    KeyCode::BackTab => {
-                        let count = self.cwd_choices().len().max(1);
-                        draft.cwd_index = (draft.cwd_index + 1) % count;
-                    }
-                    KeyCode::Backspace => {
-                        draft.buffer.pop();
-                    }
-                    KeyCode::Char(c) if !ctrl => draft.buffer.push(c),
-                    _ => {}
-                }
-                self.mode = Mode::NewInput(draft);
                 Vec::new()
             }
             Mode::LinkInput {
@@ -737,7 +717,7 @@ impl App {
                     self.mode = Mode::LinkInput { key: target, buffer };
                     Vec::new()
                 }
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if !ctrl => {
                     buffer.push(c);
                     self.mode = Mode::LinkInput { key: target, buffer };
                     Vec::new()
@@ -781,7 +761,7 @@ impl App {
                 _ => Vec::new(),
             },
             Mode::QuitConfirm => match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('q') => {
+                KeyCode::Enter | KeyCode::Char('y') => {
                     self.should_quit = true;
                     vec![Effect::Quit]
                 }
@@ -797,55 +777,70 @@ impl App {
         }
     }
 
+    /// Keys while the list is in front.
+    ///
+    /// Printable characters go to the new-session prompt, so every action
+    /// needs a modifier. The line-editing chords a text field owes its user —
+    /// Ctrl+U and Ctrl+W — stay with the text; the rest are actions.
     fn handle_normal(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Char('q') => self.mode = Mode::QuitConfirm,
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('n') => self.mode = Mode::NewInput(NewSession::new(Provider::Claude)),
-            KeyCode::Char('/') => self.mode = Mode::Search,
+            // Enter acts on the prompt when it has something, and on the
+            // selected row when it does not.
+            KeyCode::Enter => {
+                if !self.draft.buffer.trim().is_empty() {
+                    let draft = self.draft.clone();
+                    let effects = self.submit_new_session(&draft);
+                    if !effects.is_empty() {
+                        self.draft.buffer.clear();
+                    }
+                    return effects;
+                }
+                return self.open_selected();
+            }
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::Up => self.move_selection(-1),
+
+            // The new session's agent and directory.
             KeyCode::Tab => {
+                self.draft.provider = match self.draft.provider {
+                    Provider::Claude => Provider::Codex,
+                    Provider::Codex => Provider::Claude,
+                };
+            }
+            KeyCode::BackTab => {
+                let count = self.cwd_choices().len().max(1);
+                self.draft.cwd_index = (self.draft.cwd_index + 1) % count;
+            }
+
+            // Editing the prompt.
+            KeyCode::Backspace => {
+                self.draft.buffer.pop();
+            }
+            KeyCode::Char('u') if ctrl => self.draft.buffer.clear(),
+            KeyCode::Char('w') if ctrl => {
+                let trimmed = self.draft.buffer.trim_end();
+                let cut = trimmed.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                self.draft.buffer.truncate(cut);
+            }
+            KeyCode::Esc => self.draft.buffer.clear(),
+
+            // Actions.
+            KeyCode::Char('t') if ctrl => {
                 self.view = self.view.next();
                 self.ensure_selection();
             }
-            KeyCode::Char('r') => return vec![Effect::Refresh],
-            KeyCode::Char('H') => {
-                self.show_hidden = !self.show_hidden;
-                self.ensure_selection();
-            }
-            KeyCode::Char('z') => {
+            KeyCode::Char('f') if ctrl => self.mode = Mode::Search,
+            KeyCode::Char('r') if ctrl => return vec![Effect::Refresh],
+            KeyCode::Char('o') if ctrl => {
                 self.show_history = !self.show_history;
                 self.ensure_selection();
             }
-            KeyCode::Enter => {
-                if let Some(v) = self.selected_view() {
-                    let k = v.session.key.clone();
-                    return match v.state() {
-                        s if s.is_live() => vec![Effect::Attach(k)],
-                        RuntimeState::Stopped => vec![Effect::Resume(k)],
-                        _ => {
-                            self.mode = Mode::ChooseAction { key: k };
-                            Vec::new()
-                        }
-                    };
-                }
+            KeyCode::Char('y') if ctrl => {
+                self.show_hidden = !self.show_hidden;
+                self.ensure_selection();
             }
-            KeyCode::Char('m') => {
-                if let Some(k) = self.selected.clone()
-                    && let Err(e) = self.cycle_workflow(&k)
-                {
-                    self.mode = Mode::Message(e);
-                }
-            }
-            KeyCode::Char('l') => {
-                if let Some(k) = self.selected.clone() {
-                    self.mode = Mode::LinkInput {
-                        key: k,
-                        buffer: String::new(),
-                    };
-                }
-            }
-            KeyCode::Char('d') => {
+            KeyCode::Char('x') if ctrl => {
                 if let Some(v) = self.selected_view() {
                     let k = v.session.key.clone();
                     if v.is_hidden() {
@@ -860,9 +855,45 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('g') if ctrl => {
+                if let Some(k) = self.selected.clone()
+                    && let Err(e) = self.cycle_workflow(&k)
+                {
+                    self.mode = Mode::Message(e);
+                }
+            }
+            KeyCode::Char('l') if ctrl => {
+                if let Some(k) = self.selected.clone() {
+                    self.mode = Mode::LinkInput {
+                        key: k,
+                        buffer: String::new(),
+                    };
+                }
+            }
+
+            // `?` is a shortcut only when it would otherwise start a sentence.
+            KeyCode::Char('?') if self.draft.buffer.is_empty() => self.mode = Mode::Shortcuts,
+            KeyCode::Char(c) if !ctrl => self.draft.buffer.push(c),
             _ => {}
         }
         Vec::new()
+    }
+
+    /// Enter on a row: attach when it is running, resume when it has stopped,
+    /// and ask when the state does not decide.
+    fn open_selected(&mut self) -> Vec<Effect> {
+        let Some(v) = self.selected_view() else {
+            return Vec::new();
+        };
+        let k = v.session.key.clone();
+        match v.state() {
+            s if s.is_live() => vec![Effect::Attach(k)],
+            RuntimeState::Stopped => vec![Effect::Resume(k)],
+            _ => {
+                self.mode = Mode::ChooseAction { key: k };
+                Vec::new()
+            }
+        }
     }
 
     /// Turn the bar's contents into a start request. An empty task is refused
@@ -1300,7 +1331,7 @@ mod tests {
     fn workflow_cycles_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
-        app.handle_key(key('m'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert_eq!(app.selected_view().unwrap().workflow(), WorkflowState::InProgress);
         let reloaded = App::load(&Paths::at(dir.path()));
         assert_eq!(
@@ -1316,7 +1347,7 @@ mod tests {
         let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
         assert!(app.metadata_error.is_some());
         assert_eq!(app.session_keys_in_order().len(), 1);
-        app.handle_key(key('m'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("cannot edit metadata")));
         assert_eq!(
             std::fs::read(Paths::at(dir.path()).metadata_json()).unwrap(),
@@ -1335,7 +1366,7 @@ mod tests {
                 true,
             )),
         );
-        app.handle_key(key('d'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         assert!(matches!(app.mode, Mode::HideDialog { live: true, .. }));
         // 'y' is not an option for live rows; 's' requests stop-then-hide.
         assert!(app.handle_key(key('y')).is_empty());
@@ -1410,7 +1441,7 @@ mod tests {
         let mut b = session(Provider::Codex, "b", RuntimeState::Idle);
         b.title = Some("flaky test".into());
         let mut app = app_with(&dir, vec![a, b]);
-        app.handle_key(key('/'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         for c in "flaky".chars() {
             app.handle_key(key(c));
         }
@@ -1509,7 +1540,7 @@ mod tests {
         assert_eq!(folded.len(), 2);
         assert_eq!(folded.iter().map(|h| h.count).sum::<usize>(), 3);
 
-        app.handle_key(key('z'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert_eq!(app.shown_and_folded(), (4, 0));
         assert_eq!(app.session_keys_in_order().len(), 4);
     }
@@ -1541,11 +1572,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         assert_eq!(app.view, View::Status);
-        app.handle_key(code(KeyCode::Tab));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.view, View::Repository);
-        app.handle_key(code(KeyCode::Tab));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.view, View::Workflow);
-        app.handle_key(code(KeyCode::Tab));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.view, View::Status);
     }
 
@@ -1677,25 +1708,24 @@ mod tests {
             }),
         );
         app.selected = Some(SessionKey::new(Provider::Claude, "d"));
-        app.handle_key(code(KeyCode::Tab));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.selected, Some(SessionKey::new(Provider::Claude, "d")));
-        app.handle_key(code(KeyCode::Tab));
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.selected, Some(SessionKey::new(Provider::Claude, "d")));
     }
 
-    /// Typing a task and pressing Enter is the whole flow: no agent name and
-    /// no path, because both carry defaults.
+    /// Typing a task and pressing Enter is the whole flow: no key to open the
+    /// prompt, no agent name, no path.
     #[test]
     fn typing_a_task_and_enter_starts_a_session() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.launch_cwd = dir.path().to_path_buf();
 
-        app.handle_key(key('n'));
-        assert!(matches!(app.mode, Mode::NewInput(_)));
         for c in "fix the flaky test".chars() {
             app.handle_key(key(c));
         }
+        assert_eq!(app.draft.buffer, "fix the flaky test");
         let effects = app.handle_key(code(KeyCode::Enter));
         match effects.as_slice() {
             [Effect::Start { provider, request }] => {
@@ -1706,17 +1736,29 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         }
         assert_eq!(app.mode, Mode::Normal);
+        // The prompt clears once the task is on its way.
+        assert!(app.draft.buffer.is_empty());
     }
 
+    /// Enter is overloaded on whether the prompt has anything in it, so a
+    /// prompt holding only spaces must not swallow the row action.
     #[test]
-    fn an_empty_task_is_refused_rather_than_sent() {
+    fn enter_on_a_blank_prompt_acts_on_the_row() {
         let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.launch_cwd = dir.path().to_path_buf();
-        app.handle_key(key('n'));
+        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Running)]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![at("/Users/me/src/reed", "a", RuntimeState::Running)],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
         app.handle_key(key(' '));
-        assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
-        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("Type what the session")));
+        assert!(matches!(
+            app.handle_key(code(KeyCode::Enter)).as_slice(),
+            [Effect::Attach(_)]
+        ));
     }
 
     #[test]
@@ -1735,48 +1777,101 @@ mod tests {
             }),
         );
 
-        app.handle_key(key('n'));
         app.handle_key(code(KeyCode::Tab));
-        match &app.mode {
-            Mode::NewInput(d) => assert_eq!(d.provider, Provider::Codex),
-            other => panic!("unexpected {other:?}"),
-        }
+        assert_eq!(app.draft.provider, Provider::Codex);
         // Tab is a toggle, so a second press comes back to Claude.
         app.handle_key(code(KeyCode::Tab));
-        match &app.mode {
-            Mode::NewInput(d) => assert_eq!(d.provider, Provider::Claude),
-            other => panic!("unexpected {other:?}"),
-        }
+        assert_eq!(app.draft.provider, Provider::Claude);
         app.handle_key(code(KeyCode::Tab));
 
         // The launch directory comes first; Shift+Tab moves to the next one.
         app.handle_key(code(KeyCode::BackTab));
-        let draft = match &app.mode {
-            Mode::NewInput(d) => d.clone(),
-            other => panic!("unexpected {other:?}"),
-        };
-        assert_eq!(app.new_session_cwd(&draft), other);
+        assert_eq!(app.new_session_cwd(&app.draft.clone()), other);
 
         // Neither key leaves anything in the task text.
-        assert!(draft.buffer.is_empty());
-        assert_eq!(draft.provider, Provider::Codex);
+        assert!(app.draft.buffer.is_empty());
+        assert_eq!(app.draft.provider, Provider::Codex);
     }
 
-    /// Ctrl chords in the bar are left to the text field, not stolen as
-    /// shortcuts: Ctrl+A means line-start to anyone typing prose.
+    /// Every printable key belongs to the prompt, so an action key that is
+    /// not a chord would eat a letter out of the task text.
     #[test]
-    fn ctrl_chords_do_not_switch_the_agent() {
+    fn plain_letters_never_act_they_only_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
+        let before = app.view;
+        for c in "trofxgly".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.draft.buffer, "trofxgly");
+        assert_eq!(app.view, before);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(!app.show_history);
+        assert!(!app.show_hidden);
+    }
+
+    /// The chords a text field owes its user stay with the text.
+    #[test]
+    fn ctrl_u_and_ctrl_w_edit_the_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
-        app.handle_key(key('n'));
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
-        match &app.mode {
-            Mode::NewInput(d) => {
-                assert_eq!(d.provider, Provider::Claude);
-                assert!(d.buffer.is_empty());
-            }
-            other => panic!("unexpected {other:?}"),
+        for c in "fix the flaky test".chars() {
+            app.handle_key(key(c));
         }
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.draft.buffer, "fix the flaky ");
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert!(app.draft.buffer.is_empty());
+    }
+
+    #[test]
+    fn ctrl_chords_reach_the_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.view, View::Repository);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+        assert!(app.show_history);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(app.show_hidden);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::Search);
+        app.handle_key(code(KeyCode::Esc));
+
+        assert!(matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+                .as_slice(),
+            [Effect::Refresh]
+        ));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, Mode::HideDialog { .. }));
+        app.handle_key(code(KeyCode::Esc));
+
+        // The prompt was never touched by any of it.
+        assert!(app.draft.buffer.is_empty());
+    }
+
+    /// `?` opens the key list, but only when it is not the start of a task.
+    #[test]
+    fn question_mark_opens_shortcuts_only_on_an_empty_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.handle_key(key('?'));
+        assert_eq!(app.mode, Mode::Shortcuts);
+        app.handle_key(key(' '));
+        assert_eq!(app.mode, Mode::Normal);
+
+        for c in "why".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(key('?'));
+        assert_eq!(app.draft.buffer, "why?");
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     /// A provider that can only start interactively hands a plan back to the
@@ -1845,14 +1940,14 @@ mod tests {
     }
 
     #[test]
-    fn esc_leaves_the_bar_without_starting_anything() {
+    fn esc_clears_the_prompt_without_starting_anything() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
-        app.handle_key(key('n'));
         for c in "half typed".chars() {
             app.handle_key(key(c));
         }
         assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
+        assert!(app.draft.buffer.is_empty());
         assert_eq!(app.mode, Mode::Normal);
     }
 }

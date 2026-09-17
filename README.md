@@ -38,25 +38,25 @@ nix develop --command cargo run -- list        # your real Claude and Codex sess
 nix develop --command cargo run                # the TUI
 ```
 
-To start a session, press `n` and type what it should do:
+To start a session, just type what it should do — the prompt at the bottom is always live:
 
 ```
 > fix the flaky billing test_
-  Claude - ~/src/api                 Tab agent  S-Tab directory  Enter start  Esc cancel
+  Claude - ~/src/api
+enter to start · tab for agent · esc to clear
 ```
 
-The task text is the only thing you have to type.
+The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
-- **`Tab` switches the agent**, Claude to Codex and back. The agent is shown on the line below the prompt, so what Enter will start is always visible.
+- **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
 - **`S-Tab` walks the directories**: where agnt was started, then the selected row's, then every other directory in the list. Starting work in a repo you can already see takes a keystroke instead of a typed path.
-
-Plain `Tab` and `Shift+Tab` rather than Ctrl chords, because `Ctrl+A` and `Ctrl+D` mean line-start and delete to anyone typing prose, and this field holds prose.
+- **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
 ### The two views
 
-`Tab` switches what the list is shaped around.
+`Ctrl+T` switches what the list is shaped around.
 
 **Status** answers "what needs me now" — cards grouped by state, the task on its own line:
 
@@ -74,9 +74,9 @@ The two agents start differently, and the difference is visible rather than smoo
   ○ Claude reed pr 971 review comments    dr5-dedup                  23h
 ```
 
-Repositories are ordered by what is in them, not by name. A third turn of `Tab` gives the cards grouped by your own classification instead of by state.
+Repositories are ordered by what is in them, not by name. A third turn of `Ctrl+T` gives the cards grouped by your own classification instead of by state.
 
-**Stopped sessions and saved history are folded away**, because they outnumber live work heavily — 50 of 56 rows on the machine this was built on. Their headings stay, marked `▸` and carrying their counts, and `z` brings them back:
+**Stopped sessions and saved history are folded away**, because they outnumber live work heavily — 50 of 56 rows on the machine this was built on. Their headings stay, marked `▸` and carrying their counts, and `Ctrl+O` brings them back:
 
 ```
 ▸ gh-own (16)                                       ● 0  ◐ 0  ○ 0  · 16
@@ -88,18 +88,21 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 
 | Key | Action |
 | --- | --- |
-| `j` / `k`, arrows | Move |
-| `Enter` | Attach when running, resume when stopped, otherwise ask |
-| `n` | Focus the new-session prompt: type the task, Enter starts it. `Tab` picks the agent, `S-Tab` the directory |
-| `/` | Search title, path, and link number |
-| `Tab` | Cycle the view: status cards, repository rows, workflow cards |
-| `m` | Change work classification |
-| `l` | Register a PR / issue URL |
-| `d` | Hide dialog; hide a running session or stop it first. On a hidden row, restore it |
-| `r` | Request a refresh |
-| `z` | Show stopped sessions and saved history, folded away by default |
-| `H` | Show hidden sessions |
-| `q` | Leave the list |
+| type | Write a task for a new session — the prompt is always live |
+| `Enter` | Start it. On an empty prompt, attach to the selected row instead |
+| `↑` `↓` | Move |
+| `Tab` / `S-Tab` | The new session's agent / directory |
+| `Ctrl+T` | Cycle view: status, repository, workflow |
+| `Ctrl+F` | Search |
+| `Ctrl+O` | Show stopped sessions and saved history |
+| `Ctrl+Y` | Show hidden rows |
+| `Ctrl+R` | Refresh |
+| `Ctrl+X` | Hide the selected row, or restore it |
+| `Ctrl+G` | Change its classification |
+| `Ctrl+L` | Attach a PR or issue URL to it |
+| `Ctrl+U` / `Ctrl+W` | Clear the prompt / delete a word |
+| `?` | The full list, on an empty prompt |
+| `Ctrl+C` | Quit |
 
 These apply while agnt owns the terminal. Inside an official CLI screen, that CLI's keys apply.
 

@@ -71,7 +71,7 @@ IDs may be given in an abbreviated display form, but an ambiguous ID is never re
 
 ### The two views
 
-The list has two shapes, because it answers two different questions, and Tab moves between them.
+The list has two shapes, because it answers two different questions, and Ctrl+T moves between them.
 
 **Status** — cards grouped by execution state, for "what needs me now". The task takes its own line; everything that qualifies it sits underneath in dim text.
 
@@ -94,9 +94,9 @@ The list has two shapes, because it answers two different questions, and Tab mov
   ◐ Claude rust project scaffolding       scaffold       PR #1        4d
 ```
 
-A third turn of Tab gives the same cards grouped by the classification the user set, which is how R04's manual axis is reached.
+A third turn of Ctrl+T gives the same cards grouped by the classification the user set, which is how R04's manual axis is reached.
 
-Stopped sessions and saved history are folded away by default and brought back with `z`. This is a scale decision rather than a taste one: on the machine this was built against, 50 of 56 rows were saved Codex conversations, some of them 200 days old, and a two-line card each buried the six live sessions under a hundred lines. A folded group keeps its heading, marked `▸`, and its heading still tallies what is inside it, so nothing is silently missing.
+Stopped sessions and saved history are folded away by default and brought back with `Ctrl+O`. This is a scale decision rather than a taste one: on the machine this was built against, 50 of 56 rows were saved Codex conversations, some of them 200 days old, and a two-line card each buried the six live sessions under a hundred lines. A folded group keeps its heading, marked `▸`, and its heading still tallies what is inside it, so nothing is silently missing.
 
 What counts as history is decided by state **and** origin: a session that has stopped, or one that exists only as a saved file. Unknown alone will not do, because every row loaded from the cache is Unknown until the first refresh answers — folding on the state alone empties the list on a cold start.
 
@@ -106,17 +106,27 @@ These are fictional examples. Below the selected row, a short latest preview, th
 
 | Key in the list | Operation |
 | --- | --- |
-| j/k, arrows | Move between rows |
-| Enter | Attach when running, resume when stopped. When it cannot be decided, ask which operation |
-| n | Focus the new-session prompt. The task text is typed; Tab picks the agent and Shift+Tab the directory |
-| / | Local search over title, path, and related number |
-| Tab | Cycle the view: status cards, repository rows, workflow cards |
-| m | Change work classification |
-| l | Register or edit a PR / issue URL |
-| d | Delete dialog. When running, choose between continuing and hiding, or stopping then hiding |
-| z | Show stopped sessions and saved history, which are folded away by default |
-| r | Request an asynchronous refresh |
-| q | Leave the list. The effect on sessions follows the chosen runtime's behaviour, which is shown |
+| type | Write a task for a new session. The prompt is always live |
+| Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
+| Up / Down | Move between rows |
+| Tab / Shift+Tab | The new session's agent / directory |
+| Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
+| Ctrl+F | Local search over title, path, and related number |
+| Ctrl+O | Show stopped sessions and saved history, folded away by default |
+| Ctrl+Y | Show rows hidden from the list |
+| Ctrl+R | Request an asynchronous refresh |
+| Ctrl+X | Hide the selected row, or restore a hidden one. When running, choose between continuing and hiding, or stopping then hiding |
+| Ctrl+G | Change work classification |
+| Ctrl+L | Register or edit a PR / issue URL |
+| Ctrl+U / Ctrl+W | Clear the prompt / delete a word |
+| ? | The full key list, on an empty prompt |
+| Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
+
+**Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those.
+
+`Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row. This is one key doing the obvious thing in both states rather than two keys to remember.
+
+The footer carries only what is useful in the current state: a few keys when the prompt is empty, the start keys when it is not. The full list is behind `?`, not across the bottom of the screen.
 
 The new-session prompt sits below the detail pane and is always on screen, showing the agent and directory a new session would use. Requiring only the task text is deliberate: naming an agent and a path every time was the slowest part of starting work, and both have reasonable defaults. Tab and Shift+Tab change them rather than a Ctrl chord, because Ctrl+A and Ctrl+D mean line-start and delete in a field holding prose.
 
