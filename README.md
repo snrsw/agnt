@@ -41,8 +41,10 @@ nix develop --command cargo run                # the TUI
 To start a session, just type what it should do — the prompt at the bottom is always live:
 
 ```
+──────────────────────────────────────────────────────────
 > fix the flaky billing test_
-  Claude - ~/src/api
+  Claude · ~/src/api
+──────────────────────────────────────────────────────────
 enter to start · tab for agent · esc to clear
 ```
 

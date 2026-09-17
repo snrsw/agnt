@@ -30,7 +30,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // of the screen. A pasted path should be readable, not clipped.
     let grow_cap = ((area.height / 3).max(1) as usize).min(6);
     let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
-    let compose_h = 1 + input_h + 1;
+    // A rule above and below: the prompt is a box, not another list row.
+    let compose_h = 1 + input_h + 1 + 1;
 
     let status_h = 1 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
 
@@ -96,7 +97,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The new-session prompt. It is always live — typing anywhere in the list
 /// lands here — so it is drawn as an active field rather than as a hint.
 fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
-    let block = Block::default().borders(Borders::TOP);
+    let block = Block::default().borders(Borders::TOP | Borders::BOTTOM);
     let area = block.inner(outer);
     let width = area.width as usize;
 
@@ -718,11 +719,18 @@ mod tests {
             .lines()
             .position(|l| l.contains("Describe a task"))
             .unwrap_or_else(|| panic!("no prompt in\n{out}"));
-        let above: &str = out.lines().nth(prompt - 1).unwrap();
-        assert!(
-            above.chars().all(|c| c == '─'),
-            "expected a rule above the prompt, got {above:?}\n{out}"
-        );
+        let rule = |offset: isize| {
+            let i = (prompt as isize + offset) as usize;
+            let line: &str = out.lines().nth(i).unwrap();
+            assert!(
+                line.chars().all(|c| c == '\u{2500}'),
+                "expected a rule at {offset:+}, got {line:?}\n{out}"
+            );
+        };
+        // The prompt is a box: a rule above the text and another below the
+        // agent line, so it never reads as one more row of the list.
+        rule(-1);
+        rule(2);
     }
 
     #[test]
