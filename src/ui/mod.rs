@@ -15,11 +15,14 @@ use crate::model::{RuntimeState, SessionView, View, text};
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     let status_lines = 2 + u16::from(app.metadata_error.is_some());
+    // Each pane below the list is separated by its own rule. The detail pane
+    // is a rule plus three lines; the compose bar a rule plus two. The list
+    // takes what is left.
     let [header, body, detail, compose, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(5),
-        Constraint::Length(2),
+        Constraint::Length(4),
+        Constraint::Length(3),
         Constraint::Length(status_lines),
     ])
     .areas(area);
@@ -35,7 +38,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// The new-session bar, always on screen so starting work never needs a
 /// remembered command. Typing is the only required step: the agent and the
 /// directory carry defaults and are shown next to the prompt.
-fn draw_compose(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
+    let block = Block::default().borders(Borders::TOP);
+    let area = block.inner(outer);
     let width = area.width as usize;
     let focused = matches!(app.mode, Mode::NewInput(_));
 
@@ -68,6 +73,7 @@ fn draw_compose(frame: &mut Frame, area: Rect, app: &App) {
     if !focused {
         prompt_style = prompt_style.add_modifier(Modifier::DIM);
     }
+    frame.render_widget(block, outer);
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(text::truncate_to_width(&prompt, width), prompt_style),
@@ -286,7 +292,16 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, row)| match row {
-            ListRow::Group(h) => ListItem::new(group_line(h, app.view, total)),
+            // A blank line above each heading but the first, so groups read
+            // as separate sections rather than as one run of rows.
+            ListRow::Group(h) => {
+                let line = group_line(h, app.view, total);
+                if i == 0 {
+                    ListItem::new(line)
+                } else {
+                    ListItem::new(vec![Line::raw(""), line])
+                }
+            }
             ListRow::Session(v) => {
                 if app.selected.as_ref() == Some(v.key()) {
                     selected_index = Some(i);
@@ -548,6 +563,57 @@ mod tests {
         assert!(has(&out, "Fix the auth handler"), "{out}");
         // One line each, so the card's second line is gone.
         assert!(!has(&out, "Claude · Waiting approval · api"), "{out}");
+    }
+
+    /// Groups have to read as separate sections, so every heading but the
+    /// first carries a blank line above it.
+    #[test]
+    fn groups_are_separated_by_a_blank_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        let out = render(&app, 120, 24);
+        let lines: Vec<&str> = out.lines().collect();
+
+        let heading = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no heading {needle} in\n{out}"))
+        };
+        let first = heading("Waiting approval or input");
+        let second = heading("Idle (1)");
+
+        // The first heading sits directly under the view header.
+        assert!(!lines[first - 1].trim().is_empty(), "{out}");
+        // The second is preceded by a blank line.
+        assert!(lines[second - 1].trim().is_empty(), "{out}");
+    }
+
+    /// The panes below the list are each fenced off by a rule, so the detail
+    /// and the new-session prompt do not read as one block.
+    #[test]
+    fn the_compose_bar_is_ruled_off_from_the_detail_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![session("a", "Fix the auth handler", RuntimeState::Idle)],
+        );
+        let out = render(&app, 120, 24);
+        let prompt = out
+            .lines()
+            .position(|l| l.contains("Describe a task"))
+            .unwrap_or_else(|| panic!("no prompt in\n{out}"));
+        let above: &str = out.lines().nth(prompt - 1).unwrap();
+        assert!(
+            above.chars().all(|c| c == '─'),
+            "expected a rule above the prompt, got {above:?}\n{out}"
+        );
     }
 
     #[test]
