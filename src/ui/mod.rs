@@ -7,11 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, ListRow, Mode};
-use crate::model::{SessionView, text};
+use chrono::{DateTime, Utc};
 
-/// Below this width the branch and link columns move into the detail pane.
-const WIDE_MIN_COLS: u16 = 110;
+use crate::app::{App, GroupHeader, ListRow, Mode};
+use crate::model::{RuntimeState, SessionView, View, text};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -119,7 +118,7 @@ pub fn short_path(path: &std::path::Path) -> String {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         Span::styled(" agnt ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" grouped by {} ", app.grouping.label())),
+        Span::raw(format!(" view: {} (Tab) ", app.view.label())),
     ];
     if !app.query.is_empty() || app.mode == Mode::Search {
         spans.push(Span::raw(format!(" search: {}_ ", app.query)));
@@ -133,19 +132,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn place_text(v: &SessionView, with_branch: bool) -> String {
-    let dir = v
-        .session
-        .cwd
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| v.session.cwd.to_string_lossy().into_owned());
-    match (with_branch, v.session.branch()) {
-        (true, Some(b)) => format!("{dir} / {b}"),
-        _ => dir,
-    }
-}
-
 fn links_text(v: &SessionView) -> String {
     let labels: Vec<String> = v.links().iter().map(|l| l.short_label()).collect();
     if labels.is_empty() {
@@ -155,29 +141,129 @@ fn links_text(v: &SessionView) -> String {
     }
 }
 
-/// Column widths in terminal cells. The title column takes what is left.
-const W_STATE: usize = 26;
+/// Column widths in terminal cells.
 const W_AGENT: usize = 6;
-const W_PLACE: usize = 28;
+const W_BRANCH: usize = 22;
 const W_LINKS: usize = 20;
 const W_MARKER: usize = 2;
+const W_GLYPH: usize = 2;
 
-/// One list line, laid out by hand. A `Table` would clip a group header to
-/// the first column, so columns are padded here instead.
-fn session_line(v: &SessionView, wide: bool, title_width: usize) -> String {
-    let mut line = String::new();
-    line.push_str(&text::pad_to_width(&v.state_label(), W_STATE));
-    line.push(' ');
-    line.push_str(&text::pad_to_width(v.session.provider().label(), W_AGENT));
-    line.push(' ');
-    line.push_str(&text::pad_to_width(&text::sanitize(&v.title().0), title_width));
-    if wide {
-        line.push(' ');
-        line.push_str(&text::pad_to_width(&place_text(v, true), W_PLACE));
-        line.push(' ');
-        line.push_str(&text::pad_to_width(&links_text(v), W_LINKS));
+/// A state's glyph. Paired with a word or a tally everywhere it appears —
+/// design.md §3 forbids conveying state by colour alone, and a glyph alone is
+/// the same mistake in a different alphabet.
+fn state_glyph(state: RuntimeState) -> &'static str {
+    match state {
+        RuntimeState::WaitingApproval | RuntimeState::WaitingInput => "●",
+        RuntimeState::Running | RuntimeState::Starting => "◐",
+        RuntimeState::Idle => "○",
+        RuntimeState::Stopped => "·",
+        RuntimeState::Error => "!",
+        RuntimeState::Unknown => "?",
     }
-    line
+}
+
+fn state_style(state: RuntimeState) -> Style {
+    match state {
+        RuntimeState::WaitingApproval | RuntimeState::WaitingInput | RuntimeState::Error => {
+            Style::default().add_modifier(Modifier::BOLD)
+        }
+        RuntimeState::Stopped | RuntimeState::Unknown => Style::default().add_modifier(Modifier::DIM),
+        _ => Style::default(),
+    }
+}
+
+/// A session as two lines: the task, then everything that qualifies it.
+/// Used by the status and workflow views.
+fn card_lines(v: &SessionView, width: usize, now: DateTime<Utc>) -> Vec<Line<'static>> {
+    let links = links_text(v);
+    let links_w = if links == "—" { 0 } else { links.width() + 2 };
+    let title_w = width.saturating_sub(W_GLYPH + links_w).max(4);
+
+    let mut first = vec![
+        Span::styled(
+            text::pad_to_width(state_glyph(v.state()), W_GLYPH),
+            state_style(v.state()),
+        ),
+        Span::styled(
+            text::pad_to_width(&text::sanitize(&v.title().0), title_w),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if links_w > 0 {
+        first.push(Span::raw("  "));
+        first.push(Span::raw(links));
+    }
+
+    // Second line: agent, state in words, where, and how long ago.
+    let mut meta = vec![v.session.provider().label().to_string(), v.state_label()];
+    let mut place = v.repo();
+    if let Some(b) = v.branch_or_worktree() {
+        place.push_str(&format!(" / {b}"));
+    }
+    meta.push(place);
+    if let Some(age) = v.age(now) {
+        meta.push(age);
+    }
+    let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
+
+    vec![
+        Line::from(first),
+        Line::styled(
+            text::truncate_to_width(&second, width),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+    ]
+}
+
+/// A session as one line under a repository heading. The repository is already
+/// on the group row, so the branch is what tells two rows apart.
+fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>) -> Line<'static> {
+    let age = v.age(now).unwrap_or_default();
+    let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
+    let title_w = width.saturating_sub(fixed).max(4);
+
+    Line::from(vec![
+        Span::styled(
+            text::pad_to_width(state_glyph(v.state()), W_GLYPH),
+            state_style(v.state()),
+        ),
+        Span::raw(text::pad_to_width(v.session.provider().label(), W_AGENT)),
+        Span::raw(" "),
+        Span::raw(text::pad_to_width(&text::sanitize(&v.title().0), title_w)),
+        Span::raw(" "),
+        Span::styled(
+            text::pad_to_width(&v.branch_or_worktree().unwrap_or_default(), W_BRANCH),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" "),
+        Span::raw(text::pad_to_width(&links_text(v), W_LINKS)),
+        Span::styled(
+            text::pad_to_width(&age, 4),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+    ])
+}
+
+/// A group heading. In the repository view it carries the tally, which is what
+/// lets a repo say what is inside it without being expanded.
+fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
+    let left = format!("── {} ({}) ", h.label, h.count);
+    if view != View::Repository {
+        return Line::styled(
+            text::truncate_to_width(&left, width),
+            Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+        );
+    }
+    let tally = format!(
+        "● {}  ◐ {}  ○ {}  · {}",
+        h.needs_you, h.running, h.idle, h.resting
+    );
+    let gap = width.saturating_sub(left.width()).saturating_sub(tally.width());
+    Line::from(vec![
+        Span::styled(left, Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(tally, Style::default().add_modifier(Modifier::DIM)),
+    ])
 }
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -192,34 +278,15 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let total = area.width as usize;
-    let wide = area.width >= WIDE_MIN_COLS;
-    let fixed = W_MARKER + W_STATE + 1 + W_AGENT + 1 + if wide { W_PLACE + 1 + W_LINKS + 1 } else { 0 };
-    let title_width = total.saturating_sub(fixed).max(4);
-
-    let mut header = String::from("  ");
-    header.push_str(&text::pad_to_width("State", W_STATE));
-    header.push(' ');
-    header.push_str(&text::pad_to_width("Agent", W_AGENT));
-    header.push(' ');
-    header.push_str(&text::pad_to_width("Content", title_width));
-    if wide {
-        header.push(' ');
-        header.push_str(&text::pad_to_width("Location / branch", W_PLACE));
-        header.push(' ');
-        header.push_str(&text::pad_to_width("Related", W_LINKS));
-    }
-
+    let total = (area.width as usize).saturating_sub(W_MARKER);
+    let now = Utc::now();
     let mut selected_index = None;
+
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
         .map(|(i, row)| match row {
-            ListRow::Group { label, count } => ListItem::new(text::truncate_to_width(
-                &format!("── {label} ({count}) ──"),
-                total,
-            ))
-            .style(Style::default().add_modifier(Modifier::BOLD | Modifier::DIM)),
+            ListRow::Group(h) => ListItem::new(group_line(h, app.view, total)),
             ListRow::Session(v) => {
                 if app.selected.as_ref() == Some(v.key()) {
                     selected_index = Some(i);
@@ -228,28 +295,22 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 if v.is_hidden() {
                     style = style.add_modifier(Modifier::DIM);
                 }
-                ListItem::new(text::truncate_to_width(
-                    &session_line(v, wide, title_width),
-                    total.saturating_sub(W_MARKER),
-                ))
-                .style(style)
+                let item = if app.view.is_cards() {
+                    ListItem::new(card_lines(v, total, now))
+                } else {
+                    ListItem::new(compact_line(v, total, now))
+                };
+                item.style(style)
             }
         })
         .collect();
-
-    let [header_area, list_area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(text::truncate_to_width(&header, total))
-            .style(Style::default().add_modifier(Modifier::UNDERLINED)),
-        header_area,
-    );
 
     let list = List::new(items)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
         .highlight_symbol("> ");
     let mut state = ListState::default();
     state.select(selected_index);
-    frame.render_stateful_widget(list, list_area, &mut state);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
@@ -263,7 +324,7 @@ fn draw_detail(frame: &mut Frame, area: Rect, app: &App) {
     let width = inner.width as usize;
     let preview = text::truncate_to_width(&v.preview(), width);
     let mut place = v.session.cwd.to_string_lossy().into_owned();
-    if let Some(b) = v.session.branch() {
+    if let Some(b) = v.branch_or_worktree() {
         place.push_str(&format!("  [{b}]"));
     }
     place.push_str(&format!("  {}", links_text(&v)));
@@ -320,7 +381,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
     lines.push(Line::from(text::truncate_to_width(
-        "j/k move  Enter attach/resume  n new  / search  Tab group  m class  l link  d delete  r refresh  H hidden  q quit",
+        "j/k move  Enter attach/resume  n new  / search  Tab view  m class  l link  d delete  r refresh  H hidden  q quit",
         width,
     )));
     frame.render_widget(
@@ -452,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_list_shows_group_state_title_branch_and_links() {
+    fn the_status_view_draws_a_card_per_session() {
         let dir = tempfile::tempdir().unwrap();
         let app = app_with(
             &dir,
@@ -464,13 +525,33 @@ mod tests {
         let out = render(&app, 120, 24);
         assert!(has(&out, "Waiting approval or input (1)"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
-        assert!(has(&out, "Idle (1)"), "{out}");
         assert!(has(&out, "PR #123"), "{out}");
-        assert!(has(&out, "api"), "{out}");
+        // The second line qualifies the first: agent, state in words, place.
+        assert!(has(&out, "Claude · Waiting approval · api"), "{out}");
+        assert!(has(&out, "Idle (1)"), "{out}");
     }
 
     #[test]
-    fn narrow_terminal_keeps_state_and_title_only() {
+    fn the_repository_view_draws_one_line_and_a_tally() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        app.view = crate::model::View::Repository;
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "api (2)"), "{out}");
+        assert!(has(&out, "● 1  ◐ 0  ○ 1  · 0"), "{out}");
+        assert!(has(&out, "Fix the auth handler"), "{out}");
+        // One line each, so the card's second line is gone.
+        assert!(!has(&out, "Claude · Waiting approval · api"), "{out}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_still_shows_state_and_title() {
         let dir = tempfile::tempdir().unwrap();
         let app = app_with(
             &dir,
@@ -479,8 +560,6 @@ mod tests {
         let out = render(&app, 60, 20);
         assert!(has(&out, "Running"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
-        // Branch and link columns move to the detail pane, which is still shown.
-        assert!(!has(&out, "Location / branch"), "{out}");
         assert!(has(&out, "/Users/me/src/api"), "{out}");
     }
 

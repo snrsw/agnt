@@ -54,6 +54,28 @@ Plain `Tab` and `Shift+Tab` rather than Ctrl chords, because `Ctrl+A` and `Ctrl+
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
+### The two views
+
+`Tab` switches what the list is shaped around.
+
+**Status** answers "what needs me now" — cards grouped by state, the task on its own line:
+
+```
+── Waiting approval or input (1)
+> ● claude-code-action auth subscription                        issue #880
+    Claude · Waiting input · reed · 34d
+```
+
+**Repository** answers "what was I doing in reed" — one line each, grouped by repository, with a tally on every heading:
+
+```
+── reed (15)                                        ● 1  ◐ 0  ○ 3  · 11
+> ● Claude claude-code-action auth subscription                      34d
+  ○ Claude reed pr 971 review comments    dr5-dedup                  23h
+```
+
+Repositories are ordered by what is in them, not by name. A third turn of `Tab` gives the cards grouped by your own classification instead of by state.
+
 ### Keys in the list
 
 | Key | Action |
@@ -62,7 +84,7 @@ The two agents start differently, and the difference is visible rather than smoo
 | `Enter` | Attach when running, resume when stopped, otherwise ask |
 | `n` | Focus the new-session prompt: type the task, Enter starts it. `Tab` picks the agent, `S-Tab` the directory |
 | `/` | Search title, path, and link number |
-| `Tab` | Group by runtime state or by work classification |
+| `Tab` | Cycle the view: status cards, repository rows, workflow cards |
 | `m` | Change work classification |
 | `l` | Register a PR / issue URL |
 | `d` | Hide dialog; hide a running session or stop it first. On a hidden row, restore it |

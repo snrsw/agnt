@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #e8e6e0;
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: #7c5cd6; } a:hover { color: #5b3fb0; }
+    .sheet { width: 1000px; height: 720px; box-sizing: border-box;
+      display: flex; flex-direction: column; gap: 0; background: #e8e6e0; }
+    .cap { padding: 18px 24px 12px; display: flex; flex-direction: column; gap: 5px; }
+    .cap h2 { margin: 0; font-size: 15px; font-weight: 700; color: #1a1a18; }
+    .cap p { margin: 0; font-size: 12px; line-height: 1.5; color: #6f6c64; }
+    .cap b { color: #46443e; font-weight: 700; }
+    .term { flex-grow: 1; margin: 0 24px 24px; background: #fdfdfc;
+      border: 1px solid #d5d2c9; display: flex; flex-direction: column; gap: 0;
+      padding: 10px 0; font-size: 13px; line-height: 20px; color: #1a1a18;
+      overflow: hidden; }
+    .card { display: flex; flex-direction: column; gap: 0; padding: 3px 14px; }
+    .card.sel { background: #edebe5; border-left: 2px solid #b4531f; padding-left: 12px; }
+    .l1 { display: flex; gap: 0; white-space: pre; }
+    .l2 { display: flex; gap: 0; white-space: pre; color: #78766f; font-size: 12px; }
+    .dim { color: #78766f; }
+    .faint { color: #a8a59c; }
+    .need { color: #b4531f; }
+    .link { color: #7c5cd6; }
+    .grp { color: #8b8880; padding: 8px 14px 2px; font-size: 12px; white-space: pre; }
+    .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rule { border-top: 1px solid #e4e1d9; margin: 8px 14px 6px; }
+    .title { font-weight: 700; }
+  </style>
+</helmet>
+<div class="sheet">
+  <div class="cap">
+    <h2>Status view — what needs me now</h2>
+    <p><b>Shipped.</b> Cards grouped by execution state. The task takes the line; agent, state in words, repository and age sit underneath in dim text. Tab switches to the repository view and back.</p>
+    <p><b>Still aspirational:</b> the quoted line under a waiting session. It needs a transcript source — <code>claude logs</code> returns the terminal screen, not the conversation — so today a card is two lines, not three.</p>
+  </div>
+
+  <div class="term">
+    <div class="grp">needs you (2)</div>
+    <div class="card sel">
+      <div class="l1">
+        <span class="need" style="width: 2ch; flex-shrink: 0">●</span>
+        <span class="title trunc" style="flex-grow: 1">claude-code-action auth subscription</span>
+        <span class="link" style="flex-shrink: 0">issue #880</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">Claude · waiting on you · reed / claude-action-env · 33d</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">“Blocked on `jw-grassai` granting repo admin”</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="l1">
+        <span class="need" style="width: 2ch; flex-shrink: 0">●</span>
+        <span class="title trunc" style="flex-grow: 1">reed pr 971 review comments</span>
+        <span class="link" style="flex-shrink: 0">2 PRs</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">Claude · waiting on you · reed / main · 1h</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">“How far should the dedup go?”</span>
+      </div>
+    </div>
+
+    <div class="grp">working (2)</div>
+    <div class="card">
+      <div class="l1">
+        <span style="width: 2ch; flex-shrink: 0">◐</span>
+        <span class="title trunc" style="flex-grow: 1">rust project scaffolding</span>
+        <span class="link" style="flex-shrink: 0">PR #1</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">Claude · running · agnt / worktree-scaffold · 1h</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="l1">
+        <span style="width: 2ch; flex-shrink: 0">◐</span>
+        <span class="title trunc" style="flex-grow: 1">document style skill review</span>
+        <span class="link" style="flex-shrink: 0">PR #29</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">Claude · running · dotfiles / vitter-rules · 3m</span>
+      </div>
+    </div>
+
+    <div class="grp">idle (3) · stopped and history (41)</div>
+    <div class="card">
+      <div class="l1">
+        <span class="dim" style="width: 2ch; flex-shrink: 0">○</span>
+        <span class="title trunc" style="flex-grow: 1">check issue #696</span>
+      </div>
+      <div class="l2">
+        <span style="width: 2ch; flex-shrink: 0"> </span>
+        <span class="trunc" style="flex-grow: 1">Claude · idle · reed / main · 28s</span>
+      </div>
+    </div>
+    <div class="card">
+      <div class="l1 faint">
+        <span style="width: 2ch; flex-shrink: 0">▸</span>
+        <span class="trunc" style="flex-grow: 1">2 more idle, 41 stopped and Codex history — press H</span>
+      </div>
+    </div>
+
+    <div class="rule" style="margin-top: auto"></div>
+    <div class="l1" style="padding: 6px 14px 0">
+      <span class="dim" style="width: 2ch; flex-shrink: 0">&gt;</span>
+      <span class="faint trunc" style="flex-grow: 1">Describe a task for a new session  (n)</span>
+    </div>
+    <div class="l2" style="padding: 0 14px">
+      <span style="width: 2ch; flex-shrink: 0"> </span>
+      <span class="trunc" style="flex-grow: 1">Claude · ~/src/reed</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

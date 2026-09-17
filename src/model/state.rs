@@ -143,27 +143,47 @@ impl WorkflowState {
     }
 }
 
-/// Which axis the list is grouped by (Tab toggles).
+/// A list view: a row shape together with the axis rows are grouped by.
+/// Tab cycles them.
+///
+/// The two shapes answer different questions. Cards put the task on its own
+/// line and everything that qualifies it underneath, which suits "what needs
+/// me now". Compact rows under a repository heading suit "what was I doing in
+/// this repo", where the repository is already known and the branch is what
+/// distinguishes one row from the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Grouping {
+pub enum View {
+    /// Cards, grouped by the state the provider reports.
     #[default]
-    Runtime,
+    Status,
+    /// Compact rows, grouped by repository and worktree.
+    Repository,
+    /// Cards, grouped by the classification the user set.
     Workflow,
 }
 
-impl Grouping {
-    pub fn toggle(self) -> Self {
+impl View {
+    pub const ALL: [View; 3] = [View::Status, View::Repository, View::Workflow];
+
+    pub fn next(self) -> Self {
         match self {
-            Grouping::Runtime => Grouping::Workflow,
-            Grouping::Workflow => Grouping::Runtime,
+            View::Status => View::Repository,
+            View::Repository => View::Workflow,
+            View::Workflow => View::Status,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Grouping::Runtime => "runtime state",
-            Grouping::Workflow => "work classification",
+            View::Status => "status",
+            View::Repository => "repository",
+            View::Workflow => "workflow",
         }
+    }
+
+    /// True when a session takes two lines rather than one.
+    pub fn is_cards(self) -> bool {
+        !matches!(self, View::Repository)
     }
 }
 

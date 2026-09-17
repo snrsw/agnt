@@ -285,6 +285,25 @@ impl SessionView {
         self.session.runtime.state
     }
 
+    /// Repository this session's directory belongs to.
+    pub fn repo(&self) -> String {
+        repo_and_worktree(&self.session.cwd).0
+    }
+
+    /// The branch when git reported one, otherwise the worktree directory,
+    /// which is what actually distinguishes two rows in the same repository.
+    pub fn branch_or_worktree(&self) -> Option<String> {
+        self.session
+            .branch()
+            .map(str::to_string)
+            .or_else(|| repo_and_worktree(&self.session.cwd).1)
+    }
+
+    /// Age of the last activity the provider reported.
+    pub fn age(&self, now: DateTime<Utc>) -> Option<String> {
+        self.session.last_activity_at.map(|t| relative_age(t, now))
+    }
+
     pub fn workflow(&self) -> WorkflowState {
         self.meta.workflow
     }
@@ -304,6 +323,63 @@ impl SessionView {
                         .is_some_and(|n| n.to_string() == q.trim_start_matches('#'))
             })
     }
+}
+
+/// Split a working directory into the repository it belongs to and, when the
+/// path is a worktree, the worktree's name.
+///
+/// Derived from the path rather than from git, so the list can group without
+/// running a command per row. It recognises the two worktree layouts that
+/// actually appear: `<repo>/.claude/worktrees/<name>` and
+/// `<repo>/.worktrees/<name>`.
+pub fn repo_and_worktree(cwd: &std::path::Path) -> (String, Option<String>) {
+    let parts: Vec<String> = cwd
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+
+    for (i, part) in parts.iter().enumerate() {
+        let is_marker =
+            (part == ".claude" && parts.get(i + 1).is_some_and(|w| w == "worktrees")) || part == ".worktrees";
+        if !is_marker {
+            continue;
+        }
+        let name_at = if part == ".worktrees" { i + 1 } else { i + 2 };
+        if let (Some(repo), Some(name)) = (i.checked_sub(1).and_then(|j| parts.get(j)), parts.get(name_at)) {
+            return (repo.clone(), Some(name.clone()));
+        }
+    }
+
+    let repo = parts
+        .last()
+        .cloned()
+        .unwrap_or_else(|| cwd.to_string_lossy().into_owned());
+    (repo, None)
+}
+
+/// A short age such as `3m`, `2h`, `5d`. Sub-minute reads as `now`, and a time
+/// in the future reads as `now` too rather than as a negative age.
+pub fn relative_age(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let secs = (now - then).num_seconds();
+    if secs < 60 {
+        return "now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{mins}m");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return format!("{hours}h");
+    }
+    let days = hours / 24;
+    if days < 365 {
+        return format!("{days}d");
+    }
+    format!("{}y", days / 365)
 }
 
 /// Default list order: state rank, then most recent activity first,
@@ -416,6 +492,44 @@ mod tests {
         assert!(v.matches_query("#123"));
         assert!(v.matches_query("pr #1"));
         assert!(!v.matches_query("codex"));
+    }
+
+    #[test]
+    fn a_worktree_path_resolves_to_its_repository() {
+        use std::path::Path;
+        assert_eq!(
+            repo_and_worktree(Path::new(
+                "/Users/me/src/github.com/o/reed/.claude/worktrees/slo-dash"
+            )),
+            ("reed".to_string(), Some("slo-dash".to_string()))
+        );
+        assert_eq!(
+            repo_and_worktree(Path::new("/Users/me/src/gh-own/.worktrees/sandbox")),
+            ("gh-own".to_string(), Some("sandbox".to_string()))
+        );
+        assert_eq!(
+            repo_and_worktree(Path::new("/Users/me/src/memo")),
+            ("memo".to_string(), None)
+        );
+        // A .worktrees directory with nothing under it is not a worktree, and
+        // must not panic or claim its parent as the repository.
+        assert_eq!(
+            repo_and_worktree(Path::new("/Users/me/src/thing/.worktrees")),
+            (".worktrees".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn relative_age_reads_in_the_largest_useful_unit() {
+        let now = Utc::now();
+        let ago = |d: chrono::Duration| relative_age(now - d, now);
+        assert_eq!(ago(chrono::Duration::seconds(5)), "now");
+        assert_eq!(ago(chrono::Duration::minutes(3)), "3m");
+        assert_eq!(ago(chrono::Duration::hours(2)), "2h");
+        assert_eq!(ago(chrono::Duration::days(33)), "33d");
+        assert_eq!(ago(chrono::Duration::days(800)), "2y");
+        // A clock skewed into the future reads as now, never a negative age.
+        assert_eq!(relative_age(now + chrono::Duration::hours(1), now), "now");
     }
 
     #[test]

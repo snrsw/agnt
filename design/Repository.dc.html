@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #e8e6e0;
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: #7c5cd6; } a:hover { color: #5b3fb0; }
+    .sheet { width: 1000px; height: 720px; box-sizing: border-box;
+      display: flex; flex-direction: column; gap: 0; background: #e8e6e0; }
+    .cap { padding: 18px 24px 12px; display: flex; flex-direction: column; gap: 5px; }
+    .cap h2 { margin: 0; font-size: 15px; font-weight: 700; color: #1a1a18; }
+    .cap p { margin: 0; font-size: 12px; line-height: 1.5; color: #6f6c64; }
+    .cap b { color: #46443e; font-weight: 700; }
+    .term { flex-grow: 1; margin: 0 24px 24px; background: #fdfdfc;
+      border: 1px solid #d5d2c9; display: flex; flex-direction: column; gap: 0;
+      padding: 10px 0; font-size: 13px; line-height: 20px; color: #1a1a18;
+      overflow: hidden; }
+    .r { display: flex; gap: 0; padding: 0 14px; white-space: pre; }
+    .sel { background: #edebe5; font-weight: 700; }
+    .dim { color: #78766f; }
+    .faint { color: #a8a59c; }
+    .need { color: #b4531f; }
+    .link { color: #7c5cd6; }
+    .repo { display: flex; gap: 0; padding: 7px 14px 1px; white-space: pre;
+      color: #46443e; font-weight: 700; }
+    .count { color: #a8a59c; font-weight: 400; }
+    .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .rule { border-top: 1px solid #e4e1d9; margin: 8px 14px 6px; }
+  </style>
+</helmet>
+<div class="sheet">
+  <div class="cap">
+    <h2>Repository view — what was I doing in reed</h2>
+    <p><b>Shipped.</b> One line per session under a repository heading, which tallies what is inside it. The repository is on the heading, so the branch or worktree is what tells two rows apart. Tab switches back to the status view.</p>
+    <p><b>Changed while building:</b> repositories are ordered by what is in them — the one holding something that needs you first, then by most recent activity. Alphabetical order buried the live repos under 46 rows of Codex history. The per-repository collapse drawn here is not built yet; history sinks to the bottom of its repository instead.</p>
+  </div>
+
+  <div class="term">
+    <div class="repo">
+      <span style="width: 2ch; flex-shrink: 0">▾</span>
+      <span class="trunc" style="flex-grow: 1">reed</span>
+      <span class="count" style="flex-shrink: 0">● 2  ◐ 0  ○ 2  · 21</span>
+    </div>
+    <div class="r sel">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span class="need" style="width: 2ch; flex-shrink: 0">●</span>
+      <span class="trunc" style="flex-grow: 1">claude-code-action auth subscription</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">claude-action-env</span>
+      <span class="link" style="width: 10ch; flex-shrink: 0">#880</span>
+    </div>
+    <div class="r">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span class="need" style="width: 2ch; flex-shrink: 0">●</span>
+      <span class="trunc" style="flex-grow: 1">reed pr 971 review comments</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">main</span>
+      <span class="link" style="width: 10ch; flex-shrink: 0">2 PRs</span>
+    </div>
+    <div class="r">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span class="dim" style="width: 2ch; flex-shrink: 0">○</span>
+      <span class="trunc" style="flex-grow: 1">sli reports access</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">feat+slo-dashboard</span>
+      <span class="link" style="width: 10ch; flex-shrink: 0">#973</span>
+    </div>
+    <div class="r">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span class="dim" style="width: 2ch; flex-shrink: 0">○</span>
+      <span class="trunc" style="flex-grow: 1">check issue #696</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">main</span>
+      <span style="width: 10ch; flex-shrink: 0"></span>
+    </div>
+    <div class="r faint">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span style="width: 2ch; flex-shrink: 0">▸</span>
+      <span class="trunc" style="flex-grow: 1">21 stopped and Codex history</span>
+    </div>
+
+    <div class="repo">
+      <span style="width: 2ch; flex-shrink: 0">▾</span>
+      <span class="trunc" style="flex-grow: 1">agnt</span>
+      <span class="count" style="flex-shrink: 0">● 0  ◐ 1  ○ 0  · 0</span>
+    </div>
+    <div class="r">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span style="width: 2ch; flex-shrink: 0">◐</span>
+      <span class="trunc" style="flex-grow: 1">rust project scaffolding</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">worktree-scaffold</span>
+      <span class="link" style="width: 10ch; flex-shrink: 0">#1</span>
+    </div>
+
+    <div class="repo">
+      <span style="width: 2ch; flex-shrink: 0">▾</span>
+      <span class="trunc" style="flex-grow: 1">dotfiles</span>
+      <span class="count" style="flex-shrink: 0">● 0  ◐ 1  ○ 0  · 8</span>
+    </div>
+    <div class="r">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span style="width: 2ch; flex-shrink: 0">◐</span>
+      <span class="trunc" style="flex-grow: 1">document style skill review</span>
+      <span class="dim trunc" style="width: 22ch; flex-shrink: 0">vitter-rules</span>
+      <span class="link" style="width: 10ch; flex-shrink: 0">#29</span>
+    </div>
+    <div class="r faint">
+      <span style="width: 4ch; flex-shrink: 0"> </span>
+      <span style="width: 2ch; flex-shrink: 0">▸</span>
+      <span class="trunc" style="flex-grow: 1">8 Codex history</span>
+    </div>
+
+    <div class="repo">
+      <span style="width: 2ch; flex-shrink: 0">▸</span>
+      <span class="trunc" style="flex-grow: 1">memo</span>
+      <span class="count" style="flex-shrink: 0">● 0  ◐ 0  ○ 1  · 0</span>
+    </div>
+    <div class="repo">
+      <span style="width: 2ch; flex-shrink: 0">▸</span>
+      <span class="trunc" style="flex-grow: 1">gh-own</span>
+      <span class="count" style="flex-shrink: 0">● 0  ◐ 0  ○ 0  · 12</span>
+    </div>
+
+    <div class="rule" style="margin-top: auto"></div>
+    <div class="r">
+      <span class="dim" style="width: 2ch; flex-shrink: 0">&gt;</span>
+      <span class="faint trunc" style="flex-grow: 1">Describe a task for a new session  (n)</span>
+    </div>
+    <div class="r dim">
+      <span style="width: 2ch; flex-shrink: 0"> </span>
+      <span class="trunc" style="flex-grow: 1">Claude · reed — the repo you are in</span>
+    </div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

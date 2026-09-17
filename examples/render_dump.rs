@@ -73,15 +73,20 @@ fn main() {
         }),
     );
 
-    // Draw the same list twice: resting, then with the new-session bar focused.
-    for label in ["resting", "composing"] {
-        if label == "composing" {
-            let mut draft = agnt::app::NewSession::new(agnt::model::Provider::Claude);
-            draft.buffer = "fix the flaky billing test".into();
-            app.mode = agnt::app::Mode::NewInput(draft);
+    // Draw the list in each view, then with the new-session bar focused.
+    for label in ["status view", "repository view", "composing"] {
+        match label {
+            "repository view" => app.view = agnt::model::View::Repository,
+            "composing" => {
+                app.view = agnt::model::View::Status;
+                let mut draft = agnt::app::NewSession::new(agnt::model::Provider::Claude);
+                draft.buffer = "fix the flaky billing test".into();
+                app.mode = agnt::app::Mode::NewInput(draft);
+            }
+            _ => {}
         }
         let width = 120u16;
-        let mut t = Terminal::new(TestBackend::new(width, 18)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(width, 22)).unwrap();
         t.draw(|f| agnt::ui::draw(f, &app)).unwrap();
         println!("=== {label} ===");
         for row in t.backend().buffer().content().chunks(width as usize) {

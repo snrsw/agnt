@@ -222,7 +222,7 @@ async fn list(paths: &Paths, json: bool, hidden: bool, no_refresh: bool) -> anyh
         .into_iter()
         .filter_map(|r| match r {
             app::ListRow::Session(v) => Some(*v),
-            app::ListRow::Group { .. } => None,
+            app::ListRow::Group(_) => None,
         })
         .collect();
 

@@ -22,3 +22,6 @@ target
 
 # direnv cache
 .direnv/
+
+# Generated design canvas (re-seeded from design/*.dc.html)
+design/agnt-session-list.html

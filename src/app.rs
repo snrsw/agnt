@@ -13,8 +13,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::model::{
-    Grouping, Link, LinkSource, Origin, Provider, Runtime, RuntimeState, Session, SessionKey, SessionMeta,
-    SessionView, session::sort_views,
+    Link, LinkSource, Origin, Provider, Runtime, RuntimeState, Session, SessionKey, SessionMeta, SessionView,
+    View, session::sort_views,
 };
 use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
@@ -125,11 +125,42 @@ pub enum Effect {
     Quit,
 }
 
+/// A group heading. The tallies let the repository view say what is inside a
+/// group without expanding it, which is the whole point of grouping by repo.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GroupHeader {
+    pub label: String,
+    pub count: usize,
+    pub needs_you: usize,
+    pub running: usize,
+    pub idle: usize,
+    pub resting: usize,
+}
+
+impl GroupHeader {
+    fn tally(label: String, members: &[SessionView]) -> Self {
+        let mut h = GroupHeader {
+            label,
+            count: members.len(),
+            ..Default::default()
+        };
+        for v in members {
+            match v.state() {
+                RuntimeState::WaitingApproval | RuntimeState::WaitingInput => h.needs_you += 1,
+                RuntimeState::Running | RuntimeState::Starting => h.running += 1,
+                RuntimeState::Idle => h.idle += 1,
+                _ => h.resting += 1,
+            }
+        }
+        h
+    }
+}
+
 /// A rendered list line. `SessionView` is boxed to keep the row enum small,
 /// since a full list allocates one entry per session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListRow {
-    Group { label: String, count: usize },
+    Group(GroupHeader),
     Session(Box<SessionView>),
 }
 
@@ -139,7 +170,7 @@ pub struct App {
     /// Set when metadata.json is corrupt or newer; editing is disabled.
     pub metadata_error: Option<String>,
     pub provider_status: BTreeMap<Provider, ProviderStatus>,
-    pub grouping: Grouping,
+    pub view: View,
     pub query: String,
     pub show_hidden: bool,
     pub selected: Option<SessionKey>,
@@ -181,7 +212,7 @@ impl App {
             metas,
             metadata_error,
             provider_status: BTreeMap::new(),
-            grouping: Grouping::default(),
+            view: View::default(),
             query: String::new(),
             show_hidden: false,
             selected: None,
@@ -244,9 +275,33 @@ impl App {
             .filter(|v| self.show_hidden || !v.is_hidden())
             .filter(|v| v.matches_query(&self.query))
             .collect();
-        sort_views(&mut views, self.grouping == Grouping::Workflow);
+        sort_views(&mut views, self.view == View::Workflow);
+        if self.view == View::Repository {
+            // Order repositories by what is in them, not by name: the repo
+            // holding something that needs you comes first, then the most
+            // recently active. Alphabetical order buries the repos you are
+            // working in under whichever ones happen to sort early.
+            let mut rank: BTreeMap<String, (u8, Option<DateTime<Utc>>)> = BTreeMap::new();
+            for v in &views {
+                let entry = rank
+                    .entry(v.repo())
+                    .or_insert((u8::MAX, v.session.last_activity_at));
+                entry.0 = entry.0.min(v.state().sort_rank());
+                entry.1 = entry.1.max(v.session.last_activity_at);
+            }
+            views.sort_by(|a, b| {
+                let ra = rank.get(&a.repo()).copied().unwrap_or((u8::MAX, None));
+                let rb = rank.get(&b.repo()).copied().unwrap_or((u8::MAX, None));
+                ra.0.cmp(&rb.0)
+                    .then_with(|| rb.1.cmp(&ra.1))
+                    .then_with(|| a.repo().cmp(&b.repo()))
+                    .then_with(|| a.state().sort_rank().cmp(&b.state().sort_rank()))
+                    .then_with(|| b.session.last_activity_at.cmp(&a.session.last_activity_at))
+                    .then_with(|| a.session.key.cmp(&b.session.key))
+            });
+        }
 
-        // Group first so each header can carry its own count.
+        // Group first so each header can tally what is inside it.
         let mut groups: Vec<(String, Vec<SessionView>)> = Vec::new();
         for v in views {
             let label = self.group_label(&v);
@@ -258,24 +313,22 @@ impl App {
 
         let mut rows = Vec::new();
         for (label, members) in groups {
-            rows.push(ListRow::Group {
-                label,
-                count: members.len(),
-            });
+            rows.push(ListRow::Group(GroupHeader::tally(label, &members)));
             rows.extend(members.into_iter().map(|v| ListRow::Session(Box::new(v))));
         }
         rows
     }
 
     fn group_label(&self, v: &SessionView) -> String {
-        match self.grouping {
-            Grouping::Runtime => match v.state() {
+        match self.view {
+            View::Status => match v.state() {
                 RuntimeState::WaitingApproval | RuntimeState::WaitingInput => {
                     "Waiting approval or input".to_string()
                 }
                 s => s.label().to_string(),
             },
-            Grouping::Workflow => v.workflow().label().to_string(),
+            View::Workflow => v.workflow().label().to_string(),
+            View::Repository => v.repo(),
         }
     }
 
@@ -284,7 +337,7 @@ impl App {
             .into_iter()
             .filter_map(|r| match r {
                 ListRow::Session(v) => Some(v.session.key),
-                ListRow::Group { .. } => None,
+                ListRow::Group(_) => None,
             })
             .collect()
     }
@@ -721,7 +774,7 @@ impl App {
             KeyCode::Char('n') => self.mode = Mode::NewInput(NewSession::new(Provider::Claude)),
             KeyCode::Char('/') => self.mode = Mode::Search,
             KeyCode::Tab => {
-                self.grouping = self.grouping.toggle();
+                self.view = self.view.next();
                 self.ensure_selection();
             }
             KeyCode::Char('r') => return vec![Effect::Refresh],
@@ -1066,7 +1119,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Operation, WorkflowState};
+    use crate::model::{Operation, View, WorkflowState};
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -1347,9 +1400,164 @@ mod tests {
         );
         let rows = app.rows();
         assert!(
-            matches!(&rows[0], ListRow::Group { label, count: 2 } if label == "Waiting approval or input")
+            matches!(&rows[0], ListRow::Group(h) if h.label == "Waiting approval or input" && h.count == 2)
         );
-        assert!(matches!(&rows[3], ListRow::Group { label, count: 1 } if label == "Idle"));
+        assert!(matches!(&rows[3], ListRow::Group(h) if h.label == "Idle" && h.count == 1));
+    }
+
+    fn at(cwd: &str, id: &str, state: RuntimeState) -> Session {
+        let mut s = Session::new(SessionKey::new(Provider::Claude, id), cwd);
+        s.runtime = Runtime::observed(state, "test", Utc::now());
+        s
+    }
+
+    /// Tab moves between the two views the list is built around, plus the
+    /// workflow grouping the design doc asks for, and comes back round.
+    #[test]
+    fn tab_cycles_the_views() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        assert_eq!(app.view, View::Status);
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.view, View::Repository);
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.view, View::Workflow);
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.view, View::Status);
+    }
+
+    #[test]
+    fn the_repository_view_groups_by_repo_and_tallies_each_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "a", RuntimeState::WaitingApproval),
+                    at(
+                        "/Users/me/src/reed/.claude/worktrees/slo",
+                        "b",
+                        RuntimeState::Idle,
+                    ),
+                    at("/Users/me/src/reed", "c", RuntimeState::Stopped),
+                    at("/Users/me/src/agnt", "d", RuntimeState::Running),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        app.view = View::Repository;
+        let rows = app.rows();
+
+        // A worktree belongs to its repository, not to a group of its own.
+        let groups: Vec<&GroupHeader> = rows
+            .iter()
+            .filter_map(|r| match r {
+                ListRow::Group(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups.len(), 2);
+        let reed = groups.iter().find(|h| h.label == "reed").unwrap();
+        assert_eq!(reed.count, 3);
+        assert_eq!((reed.needs_you, reed.idle, reed.resting), (1, 1, 1));
+        let agnt = groups.iter().find(|h| h.label == "agnt").unwrap();
+        assert_eq!((agnt.count, agnt.running), (1, 1));
+
+        // Inside a repository the row that needs you comes first.
+        let first = rows
+            .iter()
+            .skip_while(|r| !matches!(r, ListRow::Group(h) if h.label == "reed"))
+            .nth(1)
+            .unwrap();
+        assert!(matches!(first, ListRow::Session(v) if v.state() == RuntimeState::WaitingApproval));
+    }
+
+    /// Alphabetical repository order buries the work; the repo holding
+    /// something that needs you has to come first.
+    #[test]
+    fn repositories_are_ordered_by_what_is_in_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        let old = Utc::now() - chrono::Duration::days(200);
+        let recent = Utc::now() - chrono::Duration::minutes(5);
+
+        let mut history = at("/Users/me/src/aaa-archive", "h", RuntimeState::Unknown);
+        history.last_activity_at = Some(old);
+        let mut busy = at("/Users/me/src/zzz-reed", "w", RuntimeState::WaitingApproval);
+        busy.last_activity_at = Some(recent);
+        let mut middling = at("/Users/me/src/mmm-notes", "i", RuntimeState::Idle);
+        middling.last_activity_at = Some(recent);
+
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![history, busy, middling],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        app.view = View::Repository;
+        let labels: Vec<String> = app
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                ListRow::Group(h) => Some(h.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["zzz-reed", "mmm-notes", "aaa-archive"]);
+    }
+
+    #[test]
+    fn the_status_view_still_groups_by_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "a", RuntimeState::WaitingApproval),
+                    at("/Users/me/src/agnt", "d", RuntimeState::Running),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        assert_eq!(app.view, View::Status);
+        let labels: Vec<String> = app
+            .rows()
+            .iter()
+            .filter_map(|r| match r {
+                ListRow::Group(h) => Some(h.label.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, vec!["Waiting approval or input", "Running"]);
+    }
+
+    /// Switching views must not lose the row you were on.
+    #[test]
+    fn the_selection_survives_a_view_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(Discovery {
+                sessions: vec![
+                    at("/Users/me/src/reed", "a", RuntimeState::WaitingApproval),
+                    at("/Users/me/src/agnt", "d", RuntimeState::Running),
+                ],
+                scope_note: "test".into(),
+                complete: true,
+            }),
+        );
+        app.selected = Some(SessionKey::new(Provider::Claude, "d"));
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.selected, Some(SessionKey::new(Provider::Claude, "d")));
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.selected, Some(SessionKey::new(Provider::Claude, "d")));
     }
 
     /// Typing a task and pressing Enter is the whole flow: no agent name and

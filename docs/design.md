@@ -69,15 +69,36 @@ agnt doctor                                # supported features, versions, conne
 
 IDs may be given in an abbreviated display form, but an ambiguous ID is never resolved by first-prefix match. Internally a session is identified by provider, storage scope, and native conversation ID.
 
-### Example list
+### The two views
 
-| State | Agent | Content | Location / branch | Related |
-| --- | --- | --- | --- | --- |
-| Waiting approval | Claude | Fix the auth handler | api / fix-auth | PR #123 · issue #98 |
-| Running | Codex | Investigate a flaky test | api / fix-tests | issue #105 |
-| Idle | Claude | Tidy up the README | docs / main | — |
+The list has two shapes, because it answers two different questions, and Tab moves between them.
 
-This is a fictional example. Below the selected row, a short latest preview, the absolute path, and the last observation time are shown. On a narrow terminal, branch and related information move to the detail pane, and state and content take priority. State is never conveyed by colour alone.
+**Status** — cards grouped by execution state, for "what needs me now". The task takes its own line; everything that qualifies it sits underneath in dim text.
+
+```
+── Waiting approval or input (1)
+> ● claude-code-action auth subscription                        issue #880
+    Claude · Waiting input · reed · 34d
+── Running (1)
+  ◐ rust project scaffolding                                    PR #1
+    Claude · Running · agnt / scaffold · 4d
+```
+
+**Repository** — one line per session, grouped by repository, for "what was I doing in reed". The repository is on the heading, so the branch or worktree is what tells two rows apart, and each heading tallies what is inside it.
+
+```
+── reed (15)                                        ● 1  ◐ 0  ○ 3  · 11
+> ● Claude claude-code-action auth subscription                      34d
+  ○ Claude reed pr 971 review comments    dr5-dedup                  23h
+── agnt (1)                                         ● 0  ◐ 1  ○ 0  · 0
+  ◐ Claude rust project scaffolding       scaffold       PR #1        4d
+```
+
+A third turn of Tab gives the same cards grouped by the classification the user set, which is how R04's manual axis is reached.
+
+Repositories are ordered by what is in them — the one holding something that needs you first, then by most recent activity — because alphabetical order buries the repositories being worked in. Within a group the order is the state order above, so saved history sinks to the bottom.
+
+These are fictional examples. Below the selected row, a short latest preview, the absolute path, and the last observation time are shown. State is never conveyed by colour alone: every state carries a glyph and, in the card view, its name in words.
 
 | Key in the list | Operation |
 | --- | --- |
@@ -85,7 +106,7 @@ This is a fictional example. Below the selected row, a short latest preview, the
 | Enter | Attach when running, resume when stopped. When it cannot be decided, ask which operation |
 | n | Focus the new-session prompt. The task text is typed; Tab picks the agent and Shift+Tab the directory |
 | / | Local search over title, path, and related number |
-| Tab | Switch grouping between execution state and work classification |
+| Tab | Cycle the view: status cards, repository rows, workflow cards |
 | m | Change work classification |
 | l | Register or edit a PR / issue URL |
 | d | Delete dialog. When running, choose between continuing and hiding, or stopping then hiding |

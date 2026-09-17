@@ -15,4 +15,4 @@ pub use capability::{Capabilities, Operation, Support};
 pub use key::{IdResolveError, Provider, SessionKey, resolve_key};
 pub use link::{Link, LinkKind, LinkParseError, LinkSource};
 pub use session::{GitInfo, Origin, Runtime, RuntimeHandle, Session, SessionMeta, SessionView, TitleSource};
-pub use state::{Grouping, RuntimeState, WorkflowState};
+pub use state::{RuntimeState, View, WorkflowState};
