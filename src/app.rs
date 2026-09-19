@@ -19,6 +19,7 @@ use crate::model::{
 use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
+use crate::shell::{self, Abbreviation, Shell};
 use crate::storage::{CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
 use crate::ui;
@@ -56,6 +57,8 @@ pub enum AppEvent {
         stderr: String,
         ok: bool,
     },
+    /// The shell answered with its abbreviations, or aliases.
+    Abbreviations(BTreeMap<String, Abbreviation>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +119,11 @@ impl NewSession {
 /// the shell ends in becomes where the next session starts — so `cd` works
 /// the way it does anywhere, inside `&&` chains included.
 ///
+/// Abbreviations and aliases are expanded by agnt before the line is run,
+/// because they are features of the shell's line editor and nothing expands
+/// them for a command handed to `-c`. History is off: this prompt is for
+/// getting somewhere, not a session to scroll back through.
+///
 /// Commands run without a terminal: stdin is closed and output is captured.
 /// Anything that needs a TTY — an editor, a pager — will not work here, and
 /// that is the line this stops at. A PTY with a screen behind it is the thing
@@ -126,94 +134,6 @@ pub enum InputMode {
     Task,
     Shell,
 }
-
-/// Printed by the shell after each command so the directory it ended in can
-/// be read back. Deliberately dull text: it has to survive every shell's
-/// `printf` and never be mistaken for output.
-pub const PWD_MARKER: &str = "__agnt_pwd__:";
-
-/// The user's shell, or `/bin/sh` when none is set.
-pub fn shell_program() -> PathBuf {
-    std::env::var_os("SHELL")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
-}
-
-/// The line as handed to `$SHELL -c`: the command, then a trailer that
-/// prints the directory the shell is now in and exits with the command's own
-/// status. The trailer runs in the same shell, after the command, so a `cd`
-/// in the command has already happened when `$PWD` is printed.
-///
-/// The status has to be saved before the `printf`, or the shell reports the
-/// `printf`'s success rather than the command's — `cd nope` would read as
-/// fine. Saving it is the one place shells differ: `$?` and `x=…` are POSIX,
-/// fish spells them `$status` and `set x …`.
-pub fn shell_script(shell: &std::path::Path, line: &str) -> String {
-    let is_fish = shell.file_name().is_some_and(|n| n == "fish");
-    let (save, exit) = if is_fish {
-        ("set __agnt_s $status", "exit $__agnt_s")
-    } else {
-        ("__agnt_s=$?", "exit $__agnt_s")
-    };
-    format!("{line}\n{save}\nprintf '\\n{PWD_MARKER}%s\\n' \"$PWD\"\n{exit}")
-}
-
-/// Split the marker trailer off captured stdout: the output as the user
-/// should see it, and the directory the shell ended in, if the trailer ran.
-/// A command that exits the shell or fails to parse leaves no trailer, and
-/// that reads as "directory unchanged".
-pub fn split_pwd_marker(stdout: &str) -> (String, Option<PathBuf>) {
-    let Some(at) = stdout.rfind(PWD_MARKER) else {
-        return (stdout.to_string(), None);
-    };
-    let pwd = stdout[at + PWD_MARKER.len()..]
-        .lines()
-        .next()
-        .map(|s| PathBuf::from(s.trim()));
-    // The trailer starts with its own newline; drop that too.
-    let head = stdout[..at].strip_suffix('\n').unwrap_or(&stdout[..at]);
-    (head.to_string(), pwd.filter(|p| !p.as_os_str().is_empty()))
-}
-
-/// How long a shell-mode command may run before it is killed. Long enough
-/// for a build, short enough that a command waiting on a terminal it does
-/// not have gives up rather than wedging the list.
-pub const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Run one shell-mode line: captured stdout and stderr, and whether it
-/// succeeded. Stdin is closed so nothing can wait on input.
-pub async fn run_shell(shell: &std::path::Path, cwd: &std::path::Path, line: &str) -> (String, String, bool) {
-    let mut cmd = tokio::process::Command::new(shell);
-    cmd.arg("-c")
-        .arg(shell_script(shell, line))
-        .current_dir(cwd)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true);
-    match tokio::time::timeout(SHELL_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) => (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
-            out.status.success(),
-        ),
-        Ok(Err(e)) => (
-            String::new(),
-            format!("could not run {}: {e}", shell.display()),
-            false,
-        ),
-        Err(_) => (
-            String::new(),
-            format!(
-                "killed after {}s: shell-mode commands run without a terminal",
-                SHELL_TIMEOUT.as_secs()
-            ),
-            false,
-        ),
-    }
-}
-
-/// Lines the output pane keeps. Older lines fall off the top.
-pub const SHELL_SCROLLBACK: usize = 500;
 
 fn longest_common_prefix(names: &[String]) -> String {
     let Some(first) = names.first() else {
@@ -247,8 +167,10 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
-    /// Run a shell-mode line in `$SHELL` from the current directory.
+    /// Run a shell-mode line in the user's shell, from the current directory.
     RunShell(String),
+    /// Ask the shell for its abbreviations. Sent once, on first use.
+    LoadAbbreviations,
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
     RunPlan(Box<AttachPlan>),
@@ -332,6 +254,11 @@ pub struct App {
     pub shell_busy: bool,
     /// Completion candidates, shown on the footer's detail line.
     pub notice: Option<String>,
+    /// The shell commands run in, and what it calls its abbreviations.
+    pub shell: Shell,
+    /// The user's abbreviations, once the shell has been asked for them.
+    /// `None` until the answer arrives; agnt expands them itself.
+    pub abbrs: Option<BTreeMap<String, Abbreviation>>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -377,6 +304,8 @@ impl App {
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             shell_output: Vec::new(),
             shell_busy: false,
+            shell: Shell::detect(),
+            abbrs: None,
             notice: None,
             store,
             cache,
@@ -813,6 +742,13 @@ impl App {
             self.notice = Some("still running the last command".into());
             return Vec::new();
         }
+        // Expand the way the shell's line editor would have, and echo what
+        // will actually run rather than what was typed — an abbreviation the
+        // user cannot see the expansion of is a trap.
+        let line = match &self.abbrs {
+            Some(abbrs) => shell::expand(&line, abbrs),
+            None => line,
+        };
         self.notice = None;
         self.shell_busy = true;
         self.push_shell_output(format!("$ {line}"));
@@ -821,8 +757,8 @@ impl App {
 
     fn push_shell_output(&mut self, line: String) {
         self.shell_output.push(line);
-        if self.shell_output.len() > SHELL_SCROLLBACK {
-            let drop = self.shell_output.len() - SHELL_SCROLLBACK;
+        if self.shell_output.len() > shell::SCROLLBACK {
+            let drop = self.shell_output.len() - shell::SCROLLBACK;
             self.shell_output.drain(..drop);
         }
     }
@@ -831,7 +767,7 @@ impl App {
     /// into whatever directory it ended in.
     pub fn apply_shell_done(&mut self, stdout: String, stderr: String, ok: bool) {
         self.shell_busy = false;
-        let (out, pwd) = split_pwd_marker(&stdout);
+        let (out, pwd) = shell::split_pwd_marker(&stdout);
         for line in out.lines().chain(stderr.lines()) {
             self.push_shell_output(crate::model::text::sanitize(line));
         }
@@ -1083,6 +1019,11 @@ impl App {
                 InputMode::Shell => InputMode::Task,
             };
             self.notice = None;
+            // Listing abbreviations starts a shell, so it waits until the
+            // first time shell mode is actually opened.
+            if self.input_mode == InputMode::Shell && self.abbrs.is_none() {
+                return vec![Effect::LoadAbbreviations];
+            }
             return Vec::new();
         }
         if self.input_mode == InputMode::Shell
@@ -1268,6 +1209,7 @@ impl App {
                 result,
             } => self.apply_stopped(key, then_hide, result),
             AppEvent::ShellDone { stdout, stderr, ok } => self.apply_shell_done(stdout, stderr, ok),
+            AppEvent::Abbreviations(abbrs) => self.abbrs = Some(abbrs),
         }
     }
 }
@@ -1455,11 +1397,20 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 }
                 Effect::RunShell(line) => {
                     let tx = ev_tx.clone();
-                    let shell = shell_program();
+                    let shell = app.shell.clone();
                     let cwd = app.shell_cwd.clone();
                     tokio::spawn(async move {
-                        let (stdout, stderr, ok) = run_shell(&shell, &cwd, &line).await;
+                        let (stdout, stderr, ok) = shell.run(&cwd, &line).await;
                         let _ = tx.send(AppEvent::ShellDone { stdout, stderr, ok }).await;
+                    });
+                }
+                Effect::LoadAbbreviations => {
+                    let tx = ev_tx.clone();
+                    let shell = app.shell.clone();
+                    let cwd = app.shell_cwd.clone();
+                    tokio::spawn(async move {
+                        let abbrs = shell.load_abbreviations(&cwd).await;
+                        let _ = tx.send(AppEvent::Abbreviations(abbrs)).await;
                     });
                 }
                 Effect::Start {
@@ -2179,8 +2130,8 @@ mod tests {
         app.shell_cwd = dir.path().to_path_buf();
         app.input_mode = InputMode::Shell;
 
-        let sh = std::path::Path::new("/bin/sh");
-        let (stdout, stderr, ok) = run_shell(sh, dir.path(), "cd sub && echo inside && pwd").await;
+        let sh = Shell::at("/bin/sh");
+        let (stdout, stderr, ok) = sh.run(dir.path(), "cd sub && echo inside && pwd").await;
         assert!(ok, "{stderr}");
         app.apply_shell_done(stdout, stderr, ok);
 
@@ -2193,7 +2144,7 @@ mod tests {
         );
         // The marker never reaches the pane.
         assert!(
-            !app.shell_output.iter().any(|l| l.contains(PWD_MARKER)),
+            !app.shell_output.iter().any(|l| l.contains(shell::PWD_MARKER)),
             "{:?}",
             app.shell_output
         );
@@ -2209,8 +2160,8 @@ mod tests {
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
 
-        let sh = std::path::Path::new("/bin/sh");
-        let (stdout, stderr, ok) = run_shell(sh, dir.path(), "cd nope-not-here").await;
+        let sh = Shell::at("/bin/sh");
+        let (stdout, stderr, ok) = sh.run(dir.path(), "cd nope-not-here").await;
         assert!(!ok);
         app.apply_shell_done(stdout, stderr, ok);
         // Unchanged, and in the spelling it was given, not the shell's.
@@ -2222,46 +2173,58 @@ mod tests {
         );
 
         // A command that exits the shell leaves no trailer: directory unchanged.
-        let (stdout, _, _) = run_shell(sh, dir.path(), "exit 3").await;
-        assert_eq!(split_pwd_marker(&stdout).1, None);
+        let (stdout, _, _) = sh.run(dir.path(), "exit 3").await;
+        assert_eq!(shell::split_pwd_marker(&stdout).1, None);
     }
 
-    /// The status the pane reports is the command's, not the trailer's, in
-    /// both shell families. Fish is the user's shell, so its branch runs for
-    /// real when fish is installed.
-    #[tokio::test]
-    async fn the_exit_status_is_the_commands_not_the_trailers() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut shells = vec![PathBuf::from("/bin/sh")];
-        if let Some(fish) = crate::providers::process::find_in_path("fish") {
-            shells.push(fish);
-        }
-        for shell in shells {
-            let (_, _, ok) = run_shell(&shell, dir.path(), "cd nope-not-here").await;
-            assert!(!ok, "{}: a failed cd must not read as success", shell.display());
-            let (stdout, _, ok) = run_shell(&shell, dir.path(), "echo fine").await;
-            assert!(ok, "{}", shell.display());
-            let (out, pwd) = split_pwd_marker(&stdout);
-            assert_eq!(out.trim(), "fine", "{}", shell.display());
-            assert_eq!(
-                pwd.map(|p| p.canonicalize().unwrap()),
-                Some(dir.path().canonicalize().unwrap()),
-                "{}",
-                shell.display()
-            );
-        }
-    }
-
+    /// The line that runs is the expanded one, and the pane echoes it, so an
+    /// abbreviation is never invisible.
     #[test]
-    fn the_pwd_trailer_is_split_off_cleanly() {
-        // `echo a; echo b` ends with its own newline; the trailer adds one
-        // more before the marker. Only the trailer's is stripped.
-        let (out, pwd) = split_pwd_marker(&format!("a\nb\n\n{PWD_MARKER}/tmp/x\n"));
-        assert_eq!(out, "a\nb\n");
-        assert_eq!(pwd, Some(PathBuf::from("/tmp/x")));
-        let (out, pwd) = split_pwd_marker("no trailer at all");
-        assert_eq!(out, "no trailer at all");
-        assert_eq!(pwd, None);
+    fn abbreviations_are_expanded_before_the_line_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.input_mode = InputMode::Shell;
+        app.abbrs = Some(
+            [(
+                "ls".to_string(),
+                Abbreviation {
+                    expansion: "eza --icons --git".into(),
+                    anywhere: false,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        for c in "ls -la".chars() {
+            app.handle_key(key(c));
+        }
+        let effects = app.handle_key(code(KeyCode::Enter));
+        assert_eq!(effects, vec![Effect::RunShell("eza --icons --git -la".into())]);
+        assert_eq!(
+            app.shell_output.last().map(String::as_str),
+            Some("$ eza --icons --git -la")
+        );
+    }
+
+    /// Opening shell mode asks the shell for its abbreviations, once.
+    #[test]
+    fn the_abbreviations_are_requested_on_first_use_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        assert_eq!(
+            app.handle_key(code(KeyCode::BackTab)),
+            vec![Effect::LoadAbbreviations]
+        );
+        app.handle_key(code(KeyCode::BackTab));
+        // Still pending: asking again would start another shell.
+        assert_eq!(
+            app.handle_key(code(KeyCode::BackTab)),
+            vec![Effect::LoadAbbreviations]
+        );
+
+        app.handle_app_event(AppEvent::Abbreviations(BTreeMap::new()));
+        app.handle_key(code(KeyCode::BackTab));
+        assert!(app.handle_key(code(KeyCode::BackTab)).is_empty());
     }
 
     #[test]

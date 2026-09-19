@@ -51,7 +51,11 @@ enter to start · tab for agent · esc to clear
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
-- **`S-Tab` switches the text area to a shell.** Each line runs in your `$SHELL` from the current directory, output appears in a pane above the prompt, and the directory the shell ends in is where the next session starts — so `cd` works the way it does anywhere, `cd foo && ls` included. `Tab` completes paths. `S-Tab` again comes back to the task, still there half-typed. Commands run without a terminal of their own: stdin is closed and output is captured, so an editor or a pager won't work there, and anything still running after a minute is killed.
+- **`S-Tab` switches the text area to a shell.** Each line runs in your `$SHELL` from the current directory, output appears in a pane above the prompt, and the directory the shell ends in is where the next session starts — so `cd` works the way it does anywhere, `cd foo && ls` included. `Tab` completes paths. `S-Tab` again comes back to the task, still there half-typed. **Your abbreviations and aliases work**, and agnt is the one expanding them: they are features of the shell's line editor, so nothing expands them for a command handed to `-c`, and in a generated config they are usually only *defined* for an interactive shell in the first place. agnt asks your shell for its `abbr --show` (or `alias`) once, and expands command-position words itself — the pane echoes what actually ran, so an abbreviation is never invisible. **Nothing goes into your shell history** (`fish_private_mode`, or `HISTFILE=/dev/null`).
+
+Set `AGNT_SHELL` to use something other than `$SHELL`.
+
+Commands run without a terminal of their own: stdin is closed and output is captured, so an editor or a pager won't work there, and anything still running after a minute is killed.
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
