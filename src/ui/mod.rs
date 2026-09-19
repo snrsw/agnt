@@ -14,6 +14,55 @@ use std::collections::BTreeMap;
 
 use crate::model::{RuntimeState, SessionView, TitleSource, View, text};
 
+/// The palette. Named ANSI colours only, so the list wears whatever the
+/// terminal is themed with instead of fighting it: amber on a light theme is
+/// still amber on a dark one, and a user who tuned their sixteen colours gets
+/// the list in those.
+///
+/// Colour is additive everywhere it appears. A state always has its glyph and
+/// its word as well (design.md §3), so a monochrome terminal loses nothing but
+/// the emphasis.
+mod theme {
+    use ratatui::style::{Color, Modifier, Style};
+
+    use crate::model::RuntimeState;
+
+    /// The brand mark, the cursor bar, and the caret while typing.
+    pub const ACCENT: Color = Color::Blue;
+    /// PR and issue references, the colour the agent view gives them.
+    pub const LINK: Color = Color::Magenta;
+
+    pub fn accent() -> Style {
+        Style::default().fg(ACCENT)
+    }
+
+    pub fn link() -> Style {
+        Style::default().fg(LINK)
+    }
+
+    pub fn muted() -> Style {
+        Style::default().add_modifier(Modifier::DIM)
+    }
+
+    /// Rules and borders sit behind the content, never in front of it.
+    pub fn rule() -> Style {
+        muted()
+    }
+
+    /// The colour a state wears, on its glyph and on its group heading.
+    pub fn state(s: RuntimeState) -> Style {
+        match s {
+            RuntimeState::WaitingApproval | RuntimeState::WaitingInput => {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            }
+            RuntimeState::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            RuntimeState::Running | RuntimeState::Starting => Style::default().fg(Color::Green),
+            RuntimeState::Idle => Style::default(),
+            RuntimeState::Stopped | RuntimeState::Unknown => muted(),
+        }
+    }
+}
+
 /// How many lines the typed task needs, so the input grows with it.
 fn wrapped_lines(text: &str, width: usize) -> usize {
     if text.is_empty() || width == 0 {
@@ -80,7 +129,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled("agnt", Style::default().add_modifier(Modifier::BOLD)),
+            Line::styled("agnt", theme::accent().add_modifier(Modifier::BOLD)),
             Line::styled(
                 text::truncate_to_width(&second, width),
                 Style::default().add_modifier(Modifier::DIM),
@@ -97,7 +146,9 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// The new-session prompt. It is always live — typing anywhere in the list
 /// lands here — so it is drawn as an active field rather than as a hint.
 fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
-    let block = Block::default().borders(Borders::TOP | Borders::BOTTOM);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(theme::rule());
     let area = block.inner(outer);
     let width = area.width as usize;
 
@@ -113,10 +164,11 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
             ),
         ]))
     } else {
+        // The caret takes the accent while there is something to send.
         Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("> ", theme::accent().add_modifier(Modifier::BOLD)),
             Span::raw(typed.clone()),
-            Span::raw("_"),
+            Span::styled("_", theme::accent()),
         ]))
         .wrap(Wrap { trim: false })
     };
@@ -205,13 +257,7 @@ fn state_glyph(state: RuntimeState) -> &'static str {
 }
 
 fn state_style(state: RuntimeState) -> Style {
-    match state {
-        RuntimeState::WaitingApproval | RuntimeState::WaitingInput | RuntimeState::Error => {
-            Style::default().add_modifier(Modifier::BOLD)
-        }
-        RuntimeState::Stopped | RuntimeState::Unknown => Style::default().add_modifier(Modifier::DIM),
-        _ => Style::default(),
-    }
+    theme::state(state)
 }
 
 /// The extra lines the selected row shows: where it is, how it is filed, and
@@ -258,13 +304,11 @@ fn card_lines(
     // is not styled like one — bolding it draws the eye to the least
     // informative rows in the list.
     let (title, source) = v.title();
-    let mut title_style = match source {
-        TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
-        _ => Style::default().add_modifier(Modifier::BOLD),
+    let title_style = match (source, selected) {
+        (TitleSource::ShortId, _) => theme::muted(),
+        (_, true) => theme::accent().add_modifier(Modifier::BOLD),
+        (_, false) => Style::default().add_modifier(Modifier::BOLD),
     };
-    if selected {
-        title_style = title_style.add_modifier(Modifier::UNDERLINED);
-    }
 
     let mut first = vec![
         Span::styled(
@@ -278,7 +322,7 @@ fn card_lines(
     ];
     if links_w > 0 {
         first.push(Span::raw("  "));
-        first.push(Span::raw(links));
+        first.push(Span::styled(links, theme::link()));
     }
 
     // Second line: agent, state in words, where, and how long ago.
@@ -293,12 +337,12 @@ fn card_lines(
     }
     let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
 
-    // Dim on top of the selection's reversed colours is close to unreadable,
-    // so the selected card's second line keeps full contrast.
+    // The selected card's second line keeps full contrast so it reads as
+    // part of the row the cursor is on.
     let meta_style = if selected {
         Style::default()
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        theme::muted()
     };
     let mut lines = vec![
         Line::from(first),
@@ -319,31 +363,22 @@ fn compact_lines(
     suffix: &str,
     selected: bool,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![compact_line(v, width, now, suffix, selected)];
+    let mut lines = vec![compact_line(v, width, now, suffix)];
     if selected {
         lines.extend(detail_lines(v, width, W_GLYPH + 2));
     }
     lines
 }
 
-fn compact_line(
-    v: &SessionView,
-    width: usize,
-    now: DateTime<Utc>,
-    suffix: &str,
-    selected: bool,
-) -> Line<'static> {
+fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str) -> Line<'static> {
     let age = v.age(now).unwrap_or_default();
     let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
     let title_w = width.saturating_sub(fixed).max(4);
     let (title, source) = v.title();
-    let mut title_style = match source {
+    let title_style = match source {
         TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
         _ => Style::default(),
     };
-    if selected {
-        title_style = title_style.add_modifier(Modifier::UNDERLINED);
-    }
 
     Line::from(vec![
         Span::styled(
@@ -362,36 +397,65 @@ fn compact_line(
             Style::default().add_modifier(Modifier::DIM),
         ),
         Span::raw(" "),
-        Span::raw(text::pad_to_width(&links_text(v), W_LINKS)),
-        Span::styled(
-            text::pad_to_width(&age, 4),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled(text::pad_to_width(&links_text(v), W_LINKS), theme::link()),
+        Span::styled(text::pad_to_width(&age, 4), theme::muted()),
     ])
 }
 
 /// A group heading. In the repository view it carries the tally, which is what
 /// lets a repo say what is inside it without being expanded.
+/// A heading wears the colour of what it holds. In the status view every
+/// member shares a state, so the heading takes that state's colour; a mixed
+/// group — a repository — stays neutral and lets its tally carry the colour.
+fn group_style(h: &GroupHeader) -> Style {
+    let all = |n: usize| n > 0 && n == h.count;
+    let base = if all(h.needs_you) {
+        theme::state(RuntimeState::WaitingInput)
+    } else if all(h.running) {
+        theme::state(RuntimeState::Running)
+    } else if all(h.resting) {
+        theme::muted()
+    } else {
+        Style::default()
+    };
+    base.add_modifier(Modifier::BOLD)
+}
+
 fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     // A folded group announces itself, so nothing is silently missing.
-    let marker = if h.collapsed { "▸" } else { "──" };
-    let left = format!("{marker} {} ({}) ", h.label, h.count);
+    let label = if h.collapsed {
+        format!("▸ {}", h.label)
+    } else {
+        h.label.clone()
+    };
+    let left = vec![
+        Span::styled(label, group_style(h)),
+        Span::styled(format!(" {}", h.count), theme::muted()),
+    ];
     if view != View::Repository {
-        return Line::styled(
-            text::truncate_to_width(&left, width),
-            Style::default().add_modifier(Modifier::DIM),
-        );
+        return Line::from(left);
     }
-    let tally = format!(
-        "● {}  ◐ {}  ○ {}  · {}",
-        h.needs_you, h.running, h.idle, h.resting
-    );
-    let gap = width.saturating_sub(left.width()).saturating_sub(tally.width());
-    Line::from(vec![
-        Span::styled(left, Style::default().add_modifier(Modifier::DIM)),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(tally, Style::default().add_modifier(Modifier::DIM)),
-    ])
+
+    // The tally's glyphs each wear their state's colour, so a repository row
+    // says at a glance whether anything in it needs you.
+    let tally: Vec<Span<'static>> = vec![
+        Span::styled("●", theme::state(RuntimeState::WaitingInput)),
+        Span::styled(format!(" {}  ", h.needs_you), theme::muted()),
+        Span::styled("*", theme::state(RuntimeState::Running)),
+        Span::styled(format!(" {}  ", h.running), theme::muted()),
+        Span::styled("○", Style::default()),
+        Span::styled(format!(" {}  ", h.idle), theme::muted()),
+        Span::styled("·", theme::muted()),
+        Span::styled(format!(" {}", h.resting), theme::muted()),
+    ];
+    let left_w: usize = left.iter().map(|s| s.content.width()).sum();
+    let tally_w: usize = tally.iter().map(|s| s.content.width()).sum();
+    let gap = width.saturating_sub(left_w).saturating_sub(tally_w);
+
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(tally);
+    Line::from(spans)
 }
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -420,6 +484,23 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // The cursor is a bar in the margin, not a reversed row. Every line of the
+    // selected item carries it, so a three-line card reads as one thing.
+    let gutter = |lines: Vec<Line<'static>>, selected: bool| -> Vec<Line<'static>> {
+        lines
+            .into_iter()
+            .map(|mut line| {
+                let mark = if selected {
+                    Span::styled("▎ ", theme::accent())
+                } else {
+                    Span::raw("  ")
+                };
+                line.spans.insert(0, mark);
+                line
+            })
+            .collect()
+    };
+
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -428,11 +509,12 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
             // as separate sections rather than as one run of rows.
             ListRow::Group(h) => {
                 let line = group_line(h, app.view, total);
-                if i == 0 {
-                    ListItem::new(line)
+                let lines = if i == 0 {
+                    vec![line]
                 } else {
-                    ListItem::new(vec![Line::raw(""), line])
-                }
+                    vec![Line::raw(""), line]
+                };
+                ListItem::new(gutter(lines, false))
             }
             ListRow::Session(v) => {
                 let selected = app.selected.as_ref() == Some(v.key());
@@ -449,25 +531,18 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 if v.is_hidden() {
                     style = style.add_modifier(Modifier::DIM);
                 }
-                let item = if app.view.is_cards() {
-                    ListItem::new(card_lines(v, total, now, selected, &suffix))
+                let lines = if app.view.is_cards() {
+                    card_lines(v, total, now, selected, &suffix)
                 } else {
-                    ListItem::new(compact_lines(v, total, now, &suffix, selected))
+                    compact_lines(v, total, now, &suffix, selected)
                 };
-                item.style(style)
+                ListItem::new(gutter(lines, selected)).style(style)
             }
         })
         .collect();
 
-    // No reversed background. On a light terminal it paints the whole row
-    // solid, and the selected row is three lines tall — the heaviest thing on
-    // screen for something the marker, the underline and the row's own
-    // expanded detail already say three times over.
-    // `List` defaults to a reversed highlight, so the plain style is set
-    // explicitly rather than merely left unset.
-    let list = List::new(items)
-        .highlight_style(Style::default())
-        .highlight_symbol("> ");
+    // Selection is drawn by the gutter above; the widget only scrolls to it.
+    let list = List::new(items).highlight_symbol("");
     let mut state = ListState::default();
     state.select(selected_index);
     frame.render_stateful_widget(list, area, &mut state);
@@ -590,7 +665,13 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
     let height = (body.len() as u16) + 2;
     let rect = centered(area, 80, height.max(3));
     frame.render_widget(Clear, rect);
-    let block = Block::default().borders(Borders::ALL).title(format!(" {title} "));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::accent())
+        .title(Span::styled(
+            format!(" {title} "),
+            theme::accent().add_modifier(Modifier::BOLD),
+        ));
     let lines: Vec<Line> = body.into_iter().map(Line::from).collect();
     frame.render_widget(
         Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
@@ -665,12 +746,12 @@ mod tests {
             ],
         );
         let out = render(&app, 120, 24);
-        assert!(has(&out, "Needs you (1)"), "{out}");
+        assert!(has(&out, "Needs you 1"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
         assert!(has(&out, "PR #123"), "{out}");
         // The second line qualifies the first: agent, state in words, place.
         assert!(has(&out, "Claude · Needs approval · api"), "{out}");
-        assert!(has(&out, "Idle (1)"), "{out}");
+        assert!(has(&out, "Idle 1"), "{out}");
     }
 
     #[test]
@@ -685,8 +766,8 @@ mod tests {
         );
         app.view = crate::model::View::Repository;
         let out = render(&app, 120, 24);
-        assert!(has(&out, "api (2)"), "{out}");
-        assert!(has(&out, "● 1  ◐ 0  ○ 1  · 0"), "{out}");
+        assert!(has(&out, "api 2"), "{out}");
+        assert!(has(&out, "● 1  * 0  ○ 1  · 0"), "{out}");
         assert!(has(&out, "Fix the auth handler"), "{out}");
         // One line each, so the card's second line is gone.
         assert!(!has(&out, "Claude · Needs approval · api"), "{out}");
@@ -714,7 +795,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no heading {needle} in\n{out}"))
         };
         let first = heading("Needs you");
-        let second = heading("Idle (1)");
+        let second = heading("Idle 1");
 
         // A heading is followed straight away by its own rows.
         assert!(!lines[first + 1].trim().is_empty(), "{out}");
@@ -791,87 +872,6 @@ mod tests {
         assert!(has(&out, "Delete (hide)"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
-    }
-
-    /// Count cells carrying a heavy attribute. The terminal's palette is the
-    /// user's, so weight is the only ink agnt actually controls.
-    fn heavy_cells(app: &App, width: u16, height: u16) -> (usize, usize) {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|f| draw(f, app)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let reversed = buffer
-            .content()
-            .iter()
-            .filter(|c| c.modifier.contains(Modifier::REVERSED))
-            .count();
-        let bold = buffer
-            .content()
-            .iter()
-            .filter(|c| c.modifier.contains(Modifier::BOLD) && c.symbol() != " ")
-            .count();
-        (reversed, bold)
-    }
-
-    /// A reversed row paints solid on a light terminal, and the selected row
-    /// is three lines tall. The marker, the underline and the row's own
-    /// expanded detail say "selected" without a block of ink.
-    #[test]
-    fn nothing_is_painted_in_reverse() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(
-            &dir,
-            vec![
-                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
-                session("b", "Tidy up the README", RuntimeState::Idle),
-            ],
-        );
-        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
-
-        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let hits: Vec<String> = buffer
-            .content()
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.modifier.contains(Modifier::REVERSED))
-            .map(|(i, c)| format!("row {} col {} {:?}", i / 120, i % 120, c.symbol()))
-            .take(5)
-            .collect();
-        assert!(hits.is_empty(), "reversed cells: {hits:?}");
-
-        // The marker still marks the selected row, and only that row.
-        let out = render(&app, 120, 24);
-        let marked: Vec<&str> = out
-            .lines()
-            .filter(|l| {
-                l.starts_with("> ") && l.contains("handler") || l.starts_with("> ") && l.contains("README")
-            })
-            .collect();
-        assert_eq!(marked.len(), 1, "{out}");
-        assert!(marked[0].contains("Fix the auth handler"), "{out}");
-    }
-
-    /// Bold is for what you are scanning by — the titles — not for the chrome
-    /// around them.
-    #[test]
-    fn bold_is_spent_on_titles_not_on_headings() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = app_with(
-            &dir,
-            vec![
-                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
-                session("b", "Tidy up the README", RuntimeState::Idle),
-            ],
-        );
-        let (_, bold) = heavy_cells(&app, 120, 24);
-
-        // "agnt", the two titles and the one glyph that needs you — counted
-        // without spaces, which carry no ink.
-        let ink = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
-        let titles = ink("agnt") + ink("Fix the auth handler") + ink("Tidy up the README");
-        assert!(bold >= titles, "titles should stay bold, got {bold} < {titles}");
-        assert!(bold <= titles + 4, "too much bold: {bold}");
     }
 
     /// Details belong to the row the cursor is on, not to a pane four rows

@@ -106,6 +106,8 @@ Repositories are ordered by what is in them — the one holding something that n
 
 These are fictional examples. State is never conveyed by colour alone: every state carries a glyph and, in the card view, its name in words.
 
+**Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
+
 **A session's details belong to its own row, not to a pane.** The selected row expands in place to show its absolute path, its classification and its short id — and its latest preview once a provider can supply one:
 
 ```

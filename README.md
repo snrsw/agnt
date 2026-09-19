@@ -56,6 +56,10 @@ The task text is the only thing you have to type. Because every printable key be
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
+### Colour
+
+Named ANSI colours only, so the list takes your terminal's theme rather than bringing its own: amber for needs-you, green for working, magenta for PR and issue links, blue for the cursor bar. Colour never carries meaning alone — every state also has a glyph and a word.
+
 ### The two views
 
 `Ctrl+T` switches what the list is shaped around.
