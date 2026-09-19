@@ -258,10 +258,13 @@ fn card_lines(
     // is not styled like one — bolding it draws the eye to the least
     // informative rows in the list.
     let (title, source) = v.title();
-    let title_style = match source {
+    let mut title_style = match source {
         TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
         _ => Style::default().add_modifier(Modifier::BOLD),
     };
+    if selected {
+        title_style = title_style.add_modifier(Modifier::UNDERLINED);
+    }
 
     let mut first = vec![
         Span::styled(
@@ -316,22 +319,31 @@ fn compact_lines(
     suffix: &str,
     selected: bool,
 ) -> Vec<Line<'static>> {
-    let mut lines = vec![compact_line(v, width, now, suffix)];
+    let mut lines = vec![compact_line(v, width, now, suffix, selected)];
     if selected {
         lines.extend(detail_lines(v, width, W_GLYPH + 2));
     }
     lines
 }
 
-fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str) -> Line<'static> {
+fn compact_line(
+    v: &SessionView,
+    width: usize,
+    now: DateTime<Utc>,
+    suffix: &str,
+    selected: bool,
+) -> Line<'static> {
     let age = v.age(now).unwrap_or_default();
     let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
     let title_w = width.saturating_sub(fixed).max(4);
     let (title, source) = v.title();
-    let title_style = match source {
+    let mut title_style = match source {
         TitleSource::ShortId => Style::default().add_modifier(Modifier::DIM),
         _ => Style::default(),
     };
+    if selected {
+        title_style = title_style.add_modifier(Modifier::UNDERLINED);
+    }
 
     Line::from(vec![
         Span::styled(
@@ -367,7 +379,7 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     if view != View::Repository {
         return Line::styled(
             text::truncate_to_width(&left, width),
-            Style::default().add_modifier(Modifier::BOLD | Modifier::DIM),
+            Style::default().add_modifier(Modifier::DIM),
         );
     }
     let tally = format!(
@@ -376,7 +388,7 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     );
     let gap = width.saturating_sub(left.width()).saturating_sub(tally.width());
     Line::from(vec![
-        Span::styled(left, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(left, Style::default().add_modifier(Modifier::DIM)),
         Span::raw(" ".repeat(gap)),
         Span::styled(tally, Style::default().add_modifier(Modifier::DIM)),
     ])
@@ -447,8 +459,14 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
+    // No reversed background. On a light terminal it paints the whole row
+    // solid, and the selected row is three lines tall — the heaviest thing on
+    // screen for something the marker, the underline and the row's own
+    // expanded detail already say three times over.
+    // `List` defaults to a reversed highlight, so the plain style is set
+    // explicitly rather than merely left unset.
     let list = List::new(items)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+        .highlight_style(Style::default())
         .highlight_symbol("> ");
     let mut state = ListState::default();
     state.select(selected_index);
@@ -773,6 +791,87 @@ mod tests {
         assert!(has(&out, "Delete (hide)"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
+    }
+
+    /// Count cells carrying a heavy attribute. The terminal's palette is the
+    /// user's, so weight is the only ink agnt actually controls.
+    fn heavy_cells(app: &App, width: u16, height: u16) -> (usize, usize) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let reversed = buffer
+            .content()
+            .iter()
+            .filter(|c| c.modifier.contains(Modifier::REVERSED))
+            .count();
+        let bold = buffer
+            .content()
+            .iter()
+            .filter(|c| c.modifier.contains(Modifier::BOLD) && c.symbol() != " ")
+            .count();
+        (reversed, bold)
+    }
+
+    /// A reversed row paints solid on a light terminal, and the selected row
+    /// is three lines tall. The marker, the underline and the row's own
+    /// expanded detail say "selected" without a block of ink.
+    #[test]
+    fn nothing_is_painted_in_reverse() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let hits: Vec<String> = buffer
+            .content()
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.modifier.contains(Modifier::REVERSED))
+            .map(|(i, c)| format!("row {} col {} {:?}", i / 120, i % 120, c.symbol()))
+            .take(5)
+            .collect();
+        assert!(hits.is_empty(), "reversed cells: {hits:?}");
+
+        // The marker still marks the selected row, and only that row.
+        let out = render(&app, 120, 24);
+        let marked: Vec<&str> = out
+            .lines()
+            .filter(|l| {
+                l.starts_with("> ") && l.contains("handler") || l.starts_with("> ") && l.contains("README")
+            })
+            .collect();
+        assert_eq!(marked.len(), 1, "{out}");
+        assert!(marked[0].contains("Fix the auth handler"), "{out}");
+    }
+
+    /// Bold is for what you are scanning by — the titles — not for the chrome
+    /// around them.
+    #[test]
+    fn bold_is_spent_on_titles_not_on_headings() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        let (_, bold) = heavy_cells(&app, 120, 24);
+
+        // "agnt", the two titles and the one glyph that needs you — counted
+        // without spaces, which carry no ink.
+        let ink = |s: &str| s.chars().filter(|c| !c.is_whitespace()).count();
+        let titles = ink("agnt") + ink("Fix the auth handler") + ink("Tidy up the README");
+        assert!(bold >= titles, "titles should stay bold, got {bold} < {titles}");
+        assert!(bold <= titles + 4, "too much bold: {bold}");
     }
 
     /// Details belong to the row the cursor is on, not to a pane four rows
