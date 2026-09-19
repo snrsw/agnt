@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use chrono::{DateTime, Utc};
 
-use crate::app::{App, GroupHeader, ListRow, Mode};
+use crate::app::{App, GroupHeader, InputMode, ListRow, Mode};
 use std::collections::BTreeMap;
 
 use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, text};
@@ -91,7 +91,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // The input grows with the task instead of truncating it, up to a third
     // of the screen. A pasted path should be readable, not clipped.
     let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-    let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
+    let typed = match app.input_mode {
+        InputMode::Task => &app.draft.buffer,
+        InputMode::Shell => &app.shell_line,
+    };
+    let input_h = wrapped_lines(typed, input_w).min(grow_cap) as u16;
     // A rule above and below: the prompt is a box, not another list row.
     let compose_h = 1 + input_h + 1 + 1;
 
@@ -136,7 +140,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         counts.join(" · ")
     };
 
-    let mut second = format!("{} view · {}", app.view.label(), short_path(app.launch_cwd()));
+    let mut second = format!("{} view · {}", app.view.label(), short_path(&app.shell_cwd));
     if !app.query.is_empty() || app.mode == Mode::Search {
         second.push_str(&format!("  ·  search: {}_", app.query));
     }
@@ -171,26 +175,31 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
 
     let [input_area, target_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
 
-    let typed = &app.draft.buffer;
+    // The caret says which face the text area is wearing: `>` takes a task,
+    // `$` takes a `cd`. It takes the accent while there is something to send.
+    let (caret, typed, placeholder) = match app.input_mode {
+        InputMode::Task => ("> ", &app.draft.buffer, "Describe a task for a new session"),
+        InputMode::Shell => (
+            "$ ",
+            &app.shell_line,
+            "cd <directory>   ·   shift-tab back to tasks",
+        ),
+    };
     let input = if typed.is_empty() {
         Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().add_modifier(Modifier::DIM)),
-            Span::styled(
-                "Describe a task for a new session",
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled(caret, Style::default().add_modifier(Modifier::DIM)),
+            Span::styled(placeholder, Style::default().add_modifier(Modifier::DIM)),
         ]))
     } else {
-        // The caret takes the accent while there is something to send.
         Paragraph::new(Line::from(vec![
-            Span::styled("> ", theme::accent().add_modifier(Modifier::BOLD)),
+            Span::styled(caret, theme::accent().add_modifier(Modifier::BOLD)),
             Span::raw(typed.clone()),
             Span::styled("_", theme::accent()),
         ]))
         .wrap(Wrap { trim: false })
     };
 
-    let cwd = app.new_session_cwd(&app.draft);
+    let cwd = app.new_session_cwd();
     let target = format!(
         "  {} {} · {}",
         app.draft.provider.icon(),
@@ -570,7 +579,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 
     // The selected session's details live here, on a line that is always
     // present, rather than on the row itself.
-    let detail = app.selected_view().map(|v| detail_text(&v)).unwrap_or_default();
+    let detail = match (app.input_mode, &app.notice) {
+        (InputMode::Shell, Some(notice)) => notice.clone(),
+        _ => app.selected_view().map(|v| detail_text(&v)).unwrap_or_default(),
+    };
     lines.push(Line::from(text::truncate_to_width(&detail, width)));
 
     if let Some(err) = &app.metadata_error {
@@ -586,10 +598,12 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    let hint = if !app.draft.buffer.trim().is_empty() {
-        "enter to start · tab for agent · esc to clear"
-    } else {
-        "type to start a session · enter to attach · ? for shortcuts"
+    let hint = match app.input_mode {
+        InputMode::Shell => "enter to cd · tab to complete · shift-tab back to tasks",
+        InputMode::Task if !app.draft.buffer.trim().is_empty() => {
+            "enter to start · tab for agent · esc to clear"
+        }
+        InputMode::Task => "type to start a session · enter to attach · shift-tab to cd · ? for shortcuts",
     };
     lines.push(Line::from(text::truncate_to_width(hint, width)));
 
@@ -625,7 +639,8 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "type            write a task for a new session".into(),
                 "enter           start it, or attach to the selected row when the prompt is empty".into(),
                 "up / down       move".into(),
-                "tab / s-tab     the new session's agent / directory".into(),
+                "tab             the new session's agent".into(),
+                "shift-tab       switch the text area to shell mode: cd, pwd, tab to complete".into(),
                 "".into(),
                 "ctrl+t          cycle view: status, repository, workflow".into(),
                 "ctrl+f          search".into(),
@@ -1029,6 +1044,26 @@ mod tests {
 
         assert_eq!(with_first, with_second);
         assert_eq!(with_second, with_third);
+    }
+
+    /// Shell mode wears a different caret, its own placeholder, and puts the
+    /// last command's answer on the footer line.
+    #[test]
+    fn the_shell_face_shows_a_dollar_caret_and_the_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
+        app.input_mode = InputMode::Shell;
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "$ cd <directory>"), "{out}");
+        assert!(has(&out, "shift-tab back to tasks"), "{out}");
+
+        app.shell_line = "cd ~/src".into();
+        app.notice = Some("no such directory: ~/src".into());
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "$ cd ~/src_"), "{out}");
+        assert!(has(&out, "no such directory"), "{out}");
+        // The task caret is not drawn while the shell face is up.
+        assert!(!has(&out, "> "), "{out}");
     }
 
     /// A long task must stay readable rather than being clipped to one line.

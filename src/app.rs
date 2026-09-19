@@ -86,14 +86,12 @@ pub enum Mode {
     Message(String),
 }
 
-/// What the new-session bar is holding: the task text plus the two things
-/// that would otherwise have to be typed every time.
+/// What the new-session bar is holding: the task text and the agent. The
+/// directory it starts in is `App::shell_cwd`, moved with `cd` in shell mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewSession {
     pub buffer: String,
     pub provider: Provider,
-    /// Index into the directories offered by `cwd_choices`.
-    pub cwd_index: usize,
 }
 
 impl NewSession {
@@ -101,12 +99,70 @@ impl NewSession {
         Self {
             buffer: String::new(),
             provider,
-            cwd_index: 0,
         }
     }
+}
 
-    pub fn cwd<'a>(&self, choices: &'a [PathBuf]) -> Option<&'a PathBuf> {
-        choices.get(self.cwd_index % choices.len().max(1))
+/// What the text area is for. Task mode starts sessions. Shell mode moves the
+/// directory they start in, with `cd`, which is the directory picker every
+/// terminal user already knows — and the only thing shell mode knows: it is
+/// not a shell, and running anything else here would mean a PTY and output
+/// rendering, which the ADR keeps out of the first version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    #[default]
+    Task,
+    Shell,
+}
+
+/// Resolve `.` and `..` lexically, without touching the filesystem, so
+/// `cd ../api` reads back as the path the user meant rather than as whatever
+/// a symlink resolves to.
+pub fn normalize(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn longest_common_prefix(names: &[String]) -> String {
+    let Some(first) = names.first() else {
+        return String::new();
+    };
+    let mut end = first.len();
+    for n in &names[1..] {
+        end = first
+            .char_indices()
+            .zip(n.chars())
+            .take_while(|((_, a), b)| a == b)
+            .map(|((i, a), _)| i + a.len_utf8())
+            .last()
+            .unwrap_or(0)
+            .min(end);
+    }
+    first[..end].to_string()
+}
+
+/// `$HOME` as `~`, for messages that name a directory.
+pub fn collapse_home(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    match std::env::var_os("HOME") {
+        Some(home) => {
+            let home = home.to_string_lossy();
+            match text.strip_prefix(home.as_ref()) {
+                Some(rest) => format!("~{rest}"),
+                None => text.into_owned(),
+            }
+        }
+        None => text.into_owned(),
     }
 }
 
@@ -191,10 +247,20 @@ pub struct App {
     /// Keys a preview has already been requested for, so a slow or empty
     /// answer is not asked for again on every redraw.
     preview_requested: BTreeSet<SessionKey>,
-    /// Where agnt was started. The first directory a new session is offered.
-    launch_cwd: PathBuf,
-    /// The new-session prompt, always live. Typing goes here.
+    /// The new-session prompt, always live. Typing goes here in task mode.
     pub draft: NewSession,
+    /// Whether the text area is taking a task or a `cd`.
+    pub input_mode: InputMode,
+    /// The shell-mode line being typed.
+    pub shell_line: String,
+    /// Where a new session starts. Begins where agnt was started and moves
+    /// with `cd` in shell mode.
+    pub shell_cwd: PathBuf,
+    /// Where `cd -` goes back to.
+    shell_prev: Option<PathBuf>,
+    /// The answer to the last shell command or completion, shown on the
+    /// footer's detail line while in shell mode.
+    pub notice: Option<String>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -234,8 +300,12 @@ impl App {
             cache_saved_at,
             should_quit: false,
             preview_requested: BTreeSet::new(),
-            launch_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             draft: NewSession::new(Provider::Claude),
+            input_mode: InputMode::default(),
+            shell_line: String::new(),
+            shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            shell_prev: None,
+            notice: None,
             store,
             cache,
         };
@@ -340,10 +410,6 @@ impl App {
             rows.extend(shown.into_iter().map(|v| ListRow::Session(Box::new(v))));
         }
         rows
-    }
-
-    pub fn launch_cwd(&self) -> &std::path::Path {
-        &self.launch_cwd
     }
 
     /// True when a provider's last fetch failed. Only then is it worth a line
@@ -631,34 +697,156 @@ impl App {
         self.ensure_selection();
     }
 
-    /// Directories a new session can start in: where agnt was started, then
-    /// the selected row's directory, then every other directory in the list.
-    /// Offering these removes the most tedious part of typing a new session.
-    pub fn cwd_choices(&self) -> Vec<PathBuf> {
-        let mut out = vec![self.launch_cwd.clone()];
-        let push = |p: &PathBuf, out: &mut Vec<PathBuf>| {
-            if !out.contains(p) {
-                out.push(p.clone());
-            }
-        };
-        if let Some(v) = self.selected_view() {
-            push(&v.session.cwd, &mut out);
-        }
-        for row in self.rows() {
-            if let ListRow::Session(v) = row {
-                push(&v.session.cwd, &mut out);
-            }
-        }
-        out
+    /// The directory the next session starts in.
+    pub fn new_session_cwd(&self) -> PathBuf {
+        self.shell_cwd.clone()
     }
 
-    /// The directory the new-session bar is currently pointing at.
-    pub fn new_session_cwd(&self, draft: &NewSession) -> PathBuf {
-        let choices = self.cwd_choices();
-        draft
-            .cwd(&choices)
-            .cloned()
-            .unwrap_or_else(|| self.launch_cwd.clone())
+    // ----- shell mode ----------------------------------------------------
+
+    /// Keys that belong to the shell line. Returns `None` for a key that is
+    /// not the shell line's business — the cursor keys, the Ctrl actions — so
+    /// those keep working in either mode.
+    fn handle_shell_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            KeyCode::Enter => self.run_shell_line(),
+            KeyCode::Tab => self.complete_shell_path(),
+            KeyCode::Backspace => {
+                self.shell_line.pop();
+            }
+            KeyCode::Char('u') if ctrl => self.shell_line.clear(),
+            KeyCode::Char('w') if ctrl => {
+                let trimmed = self.shell_line.trim_end();
+                let cut = trimmed.rfind(' ').map(|i| i + 1).unwrap_or(0);
+                self.shell_line.truncate(cut);
+            }
+            KeyCode::Esc => self.shell_line.clear(),
+            KeyCode::Char(c) if !ctrl => self.shell_line.push(c),
+            _ => return None,
+        }
+        Some(Vec::new())
+    }
+
+    /// `cd [dir]` and `pwd`. Anything else is answered, not run.
+    fn run_shell_line(&mut self) {
+        let line = std::mem::take(&mut self.shell_line);
+        let line = line.trim();
+        let (cmd, arg) = match line.split_once(char::is_whitespace) {
+            Some((c, a)) => (c, a.trim()),
+            None => (line, ""),
+        };
+        match cmd {
+            "" | "pwd" => self.notice = Some(collapse_home(&self.shell_cwd)),
+            "cd" => self.change_dir(arg),
+            other => {
+                self.notice = Some(format!(
+                    "`{other}` is not a command here. Shell mode knows cd and pwd: it picks a directory, it does not run things."
+                ));
+            }
+        }
+    }
+
+    fn change_dir(&mut self, arg: &str) {
+        let target = match arg {
+            "" | "~" => match std::env::var_os("HOME") {
+                Some(h) => PathBuf::from(h),
+                None => {
+                    self.notice = Some("no HOME to go to".into());
+                    return;
+                }
+            },
+            "-" => match &self.shell_prev {
+                Some(p) => p.clone(),
+                None => {
+                    self.notice = Some("no previous directory yet".into());
+                    return;
+                }
+            },
+            _ => {
+                let p = expand_home(arg);
+                if p.is_absolute() {
+                    p
+                } else {
+                    self.shell_cwd.join(p)
+                }
+            }
+        };
+        let target = normalize(&target);
+        if !target.is_dir() {
+            self.notice = Some(format!("no such directory: {}", collapse_home(&target)));
+            return;
+        }
+        self.shell_prev = Some(std::mem::replace(&mut self.shell_cwd, target));
+        self.notice = Some(collapse_home(&self.shell_cwd));
+    }
+
+    /// Complete the argument of `cd` against the directories that match. One
+    /// match fills in and closes with `/`; several fill in as far as they
+    /// agree and are listed on the footer.
+    fn complete_shell_path(&mut self) {
+        let line = self.shell_line.clone();
+        let (cmd, arg) = match line.split_once(char::is_whitespace) {
+            Some((c, a)) => (c, a.trim_start().to_string()),
+            None => {
+                if line.trim() == "cd" {
+                    self.shell_line = "cd ".into();
+                }
+                return;
+            }
+        };
+        if cmd != "cd" {
+            return;
+        }
+
+        // The typed text is split at its last `/`: everything before names
+        // the directory to search, everything after is the prefix to match.
+        let (typed_dir, prefix) = match arg.rfind('/') {
+            Some(i) => (arg[..=i].to_string(), arg[i + 1..].to_string()),
+            None => (String::new(), arg.clone()),
+        };
+        let search_in = if typed_dir.is_empty() {
+            self.shell_cwd.clone()
+        } else {
+            let p = expand_home(&typed_dir);
+            if p.is_absolute() {
+                p
+            } else {
+                self.shell_cwd.join(p)
+            }
+        };
+
+        let mut matches: Vec<String> = match std::fs::read_dir(&search_in) {
+            Ok(entries) => entries
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&prefix))
+                .filter(|n| prefix.starts_with('.') || !n.starts_with('.'))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        matches.sort();
+
+        match matches.as_slice() {
+            [] => {
+                self.notice = Some(format!(
+                    "nothing in {} starts with {prefix:?}",
+                    collapse_home(&search_in)
+                ))
+            }
+            [one] => {
+                self.shell_line = format!("{cmd} {typed_dir}{one}/");
+                self.notice = None;
+            }
+            many => {
+                let common = longest_common_prefix(many);
+                if common.len() > prefix.len() {
+                    self.shell_line = format!("{cmd} {typed_dir}{common}");
+                }
+                self.notice = Some(many.join("  "));
+            }
+        }
     }
 
     /// The selected session's key, when its short content has not been
@@ -820,6 +1008,23 @@ impl App {
     /// Ctrl+U and Ctrl+W — stay with the text; the rest are actions.
     fn handle_normal(&mut self, key: KeyEvent) -> Vec<Effect> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Shift+Tab switches the text area between a task and a `cd`. Each
+        // keeps its own line, so switching never loses a half-typed task.
+        if key.code == KeyCode::BackTab {
+            self.input_mode = match self.input_mode {
+                InputMode::Task => InputMode::Shell,
+                InputMode::Shell => InputMode::Task,
+            };
+            self.notice = None;
+            return Vec::new();
+        }
+        if self.input_mode == InputMode::Shell
+            && let Some(effects) = self.handle_shell_key(key)
+        {
+            return effects;
+        }
+
         match key.code {
             // Enter acts on the prompt when it has something, and on the
             // selected row when it does not.
@@ -837,16 +1042,12 @@ impl App {
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
 
-            // The new session's agent and directory.
+            // The new session's agent.
             KeyCode::Tab => {
                 self.draft.provider = match self.draft.provider {
                     Provider::Claude => Provider::Codex,
                     Provider::Codex => Provider::Claude,
                 };
-            }
-            KeyCode::BackTab => {
-                let count = self.cwd_choices().len().max(1);
-                self.draft.cwd_index = (self.draft.cwd_index + 1) % count;
             }
 
             // Editing the prompt.
@@ -940,7 +1141,7 @@ impl App {
             self.mode = Mode::Message("Type what the session should do, then press Enter.".into());
             return Vec::new();
         }
-        let cwd = self.new_session_cwd(draft);
+        let cwd = self.new_session_cwd();
         if !cwd.is_dir() {
             self.mode = Mode::Message(format!("cwd does not exist: {}", cwd.display()));
             return Vec::new();
@@ -1509,13 +1710,6 @@ mod tests {
         assert!(matches!(&rows[3], ListRow::Group(h) if h.label == "Idle" && h.count == 1));
     }
 
-    fn at_codex(id: &str, cwd: &std::path::Path) -> Session {
-        let mut s = Session::new(SessionKey::new(Provider::Codex, id), cwd);
-        s.runtime = Runtime::observed(RuntimeState::Idle, "test", Utc::now());
-        s.origin = Origin::Discovered;
-        s
-    }
-
     fn at(cwd: &str, id: &str, state: RuntimeState) -> Session {
         let mut s = Session::new(SessionKey::new(Provider::Claude, id), cwd);
         s.runtime = Runtime::observed(state, "test", Utc::now());
@@ -1820,7 +2014,7 @@ mod tests {
     fn typing_a_task_and_enter_starts_a_session() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
-        app.launch_cwd = dir.path().to_path_buf();
+        app.shell_cwd = dir.path().to_path_buf();
 
         for c in "fix the flaky test".chars() {
             app.handle_key(key(c));
@@ -1862,35 +2056,123 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_agent_and_shift_tab_walks_the_directories() {
+    fn tab_switches_agent_and_shift_tab_switches_to_shell_mode() {
         let dir = tempfile::tempdir().unwrap();
         let other = dir.path().join("other-repo");
         std::fs::create_dir(&other).unwrap();
         let mut app = app_with(&dir, vec![]);
-        app.launch_cwd = dir.path().to_path_buf();
-        app.apply_discovery(
-            Provider::Codex,
-            Ok(Discovery {
-                sessions: vec![at_codex("c1", &other)],
-                scope_note: "test".into(),
-                complete: true,
-            }),
-        );
+        app.shell_cwd = dir.path().to_path_buf();
 
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.draft.provider, Provider::Codex);
-        // Tab is a toggle, so a second press comes back to Claude.
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.draft.provider, Provider::Claude);
-        app.handle_key(code(KeyCode::Tab));
 
-        // The launch directory comes first; Shift+Tab moves to the next one.
+        // A half-typed task survives a trip through shell mode.
+        for c in "fix the".chars() {
+            app.handle_key(key(c));
+        }
         app.handle_key(code(KeyCode::BackTab));
-        assert_eq!(app.new_session_cwd(&app.draft.clone()), other);
+        assert_eq!(app.input_mode, InputMode::Shell);
+        for c in "cd other-repo".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.shell_line, "cd other-repo");
+        assert_eq!(app.draft.buffer, "fix the");
+        app.handle_key(code(KeyCode::Enter));
+        assert_eq!(app.shell_cwd, other);
+        assert!(app.shell_line.is_empty());
 
-        // Neither key leaves anything in the task text.
+        app.handle_key(code(KeyCode::BackTab));
+        assert_eq!(app.input_mode, InputMode::Task);
+        assert_eq!(app.draft.buffer, "fix the");
+        assert_eq!(app.new_session_cwd(), other);
+    }
+
+    /// `cd` behaves the way a shell's does for the cases that matter: a
+    /// missing target changes nothing and says so, `..` climbs, `-` returns,
+    /// and a bare `cd` goes home.
+    #[test]
+    fn cd_climbs_returns_and_refuses_what_is_not_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = a.clone();
+        app.input_mode = InputMode::Shell;
+
+        let run = |app: &mut App, line: &str| {
+            for c in line.chars() {
+                app.handle_key(key(c));
+            }
+            app.handle_key(code(KeyCode::Enter));
+        };
+
+        run(&mut app, "cd nope");
+        assert_eq!(app.shell_cwd, a);
+        assert!(app.notice.as_deref().unwrap_or("").contains("no such directory"));
+
+        run(&mut app, "cd b");
+        assert_eq!(app.shell_cwd, b);
+        run(&mut app, "cd ..");
+        assert_eq!(app.shell_cwd, a);
+        run(&mut app, "cd -");
+        assert_eq!(app.shell_cwd, b);
+
+        run(&mut app, "ls");
+        assert_eq!(app.shell_cwd, b);
+        assert!(app.notice.as_deref().unwrap_or("").contains("not a command here"));
+
+        run(&mut app, "cd");
+        assert_eq!(app.shell_cwd, PathBuf::from(std::env::var_os("HOME").unwrap()));
+    }
+
+    #[test]
+    fn tab_completes_the_cd_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["alpha", "alpine", "beta", ".hidden"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = dir.path().to_path_buf();
+        app.input_mode = InputMode::Shell;
+
+        for c in "cd b".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.shell_line, "cd beta/");
+
+        app.shell_line = "cd al".into();
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.shell_line, "cd alp");
+        assert!(app.notice.as_deref().unwrap_or("").contains("alpha"));
+        assert!(app.notice.as_deref().unwrap_or("").contains("alpine"));
+
+        // Hidden directories only offer themselves to a dotted prefix.
+        app.shell_line = "cd ".into();
+        app.handle_key(code(KeyCode::Tab));
+        assert!(!app.notice.as_deref().unwrap_or("").contains(".hidden"));
+        app.shell_line = "cd .h".into();
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.shell_line, "cd .hidden/");
+    }
+
+    /// In shell mode the letters go to the shell line, and the Ctrl actions
+    /// still reach the list.
+    #[test]
+    fn shell_mode_types_into_the_shell_line_and_keeps_the_actions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
+        app.input_mode = InputMode::Shell;
+        for c in "pwd".chars() {
+            app.handle_key(key(c));
+        }
+        assert_eq!(app.shell_line, "pwd");
         assert!(app.draft.buffer.is_empty());
-        assert_eq!(app.draft.provider, Provider::Codex);
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.view, View::Repository);
     }
 
     /// Every printable key belongs to the prompt, so an action key that is
@@ -2014,29 +2296,6 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(app.session_count(), 1);
         assert_eq!(app.selected.as_ref(), Some(&key));
-    }
-
-    #[test]
-    fn directory_choices_start_at_the_launch_dir_and_have_no_repeats() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.launch_cwd = dir.path().to_path_buf();
-        app.apply_discovery(
-            Provider::Claude,
-            Ok(Discovery {
-                sessions: vec![
-                    at(repo.to_str().unwrap(), "a", RuntimeState::Idle),
-                    at(repo.to_str().unwrap(), "b", RuntimeState::Idle),
-                ],
-                scope_note: "test".into(),
-                complete: true,
-            }),
-        );
-        let choices = app.cwd_choices();
-        assert_eq!(choices[0], dir.path());
-        assert_eq!(choices.iter().filter(|c| **c == repo).count(), 1);
     }
 
     #[test]

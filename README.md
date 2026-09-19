@@ -51,7 +51,7 @@ enter to start · tab for agent · esc to clear
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
-- **`S-Tab` walks the directories**: where agnt was started, then the selected row's, then every other directory in the list. Starting work in a repo you can already see takes a keystroke instead of a typed path.
+- **`S-Tab` switches the text area to shell mode**, where `cd` moves the directory the next session starts in — with `Tab` completion, `..`, `-`, and `~`. `S-Tab` again comes back to the task, which is still there half-typed. This is a directory picker that speaks `cd`, not a shell: it knows `cd` and `pwd` and answers anything else with a message. Running real commands would need a PTY, which the ADR keeps out of the first version.
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
@@ -108,7 +108,8 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 | type | Write a task for a new session — the prompt is always live |
 | `Enter` | Start it. On an empty prompt, attach to the selected row instead |
 | `↑` `↓` | Move, wrapping at both ends |
-| `Tab` / `S-Tab` | The new session's agent / directory |
+| `Tab` | The new session's agent |
+| `S-Tab` | Switch the text area to shell mode: `cd` moves the directory the next session starts in |
 | `Ctrl+T` | Cycle view: status, repository, workflow |
 | `Ctrl+F` | Search |
 | `Ctrl+O` | Show stopped sessions and saved history |

@@ -23,7 +23,7 @@ The name is settled. Rust, JSON, and a preference for official integration are t
 | R04 | Sorts by status | Toggle between execution state and manual work classification | Things like waiting-for-approval can be shown first |
 | R05 | Shows PRs and issues | Explicit URL registration plus GitHub enrichment | The related number and kind appear in the list |
 | R06 | Deletes a session | Hide from the list, restorable | It does not come back on refetch, and it is clear that history remains |
-| R07 | Starts in any directory | Start with a given cwd | Paths outside git, with spaces, or with non-ASCII characters all work |
+| R07 | Starts in any directory | `cd` in the prompt's shell mode, or `agnt new --cwd` | Paths outside git, with spaces, or with non-ASCII characters all work |
 | R08 | Fast | Separate drawing from external I/O | The provisional performance targets in section 11 are measured |
 | R09 | Work continues after returning to the list | Prefer the official runtime | A long-running task is not interrupted, and the list can reattach to it |
 
@@ -126,6 +126,33 @@ type to start a session · enter to attach · ? for shortcuts
 ```
 
 Two earlier shapes were built and dropped. A separate four-line pane repeated the state, repository and links already on the card, four rows from the cursor. Expanding the selected row in place was tried next; it kept the list's total height, but every row below the cursor still moved by a line each time the cursor did, and on a screen recording the list looked as though it was shuffling. A fixed footer line costs one row and moves nothing.
+
+### Keys
+
+| Key in the list | Operation |
+| --- | --- |
+| type | Write a task for a new session. The prompt is always live |
+| Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
+| Up / Down | Move between rows, wrapping at both ends |
+| Tab | The new session's agent |
+| Shift+Tab | Switch the text area to shell mode, where `cd` moves the directory the next session starts in |
+| Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
+| Ctrl+F | Local search over title, path, and related number |
+| Ctrl+O | Show stopped sessions and saved history, folded away by default |
+| Ctrl+Y | Show rows hidden from the list |
+| Ctrl+R | Request an asynchronous refresh |
+| Ctrl+X | Hide the selected row, or restore a hidden one. When running, choose between continuing and hiding, or stopping then hiding |
+| Ctrl+G | Change work classification |
+| Ctrl+L | Register or edit a PR / issue URL |
+| Ctrl+U / Ctrl+W | Clear the prompt / delete a word |
+| ? | The full key list, on an empty prompt |
+| Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
+
+**Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
+
+**Where a session starts is chosen with `cd`.** Shift+Tab switches the text area to shell mode: the caret becomes `$`, and `cd` — with Tab completion, `..`, `-`, and `~` — moves the directory the next session starts in. Shift+Tab returns to the task, which kept its half-typed text. Shell mode is a directory picker that speaks the one command every terminal user already knows for the job; it also answers `pwd`, and answers anything else with a message rather than running it. An embedded shell would need a PTY and output rendering, which ADR-0001 keeps out of the first version. This replaced cycling through the directories already in the list, which could not reach a directory with no sessions in it.
+
+The footer carries only what is useful in the current state — a few keys when the prompt is empty, the start keys when it is not, the `cd` keys in shell mode — and the full list is behind `?`. These keys apply only while the list owns the terminal. While an official CLI screen is open, that CLI's keys apply.
 
 ## 4. Architecture
 
