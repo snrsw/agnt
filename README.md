@@ -53,11 +53,11 @@ The task text is the only thing you have to type. Because every printable key be
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
 - **`S-Tab` puts your shell in the text area** — the real one, running on a pseudo-terminal. Same box, same place; what changes is what is in it. It is `$SHELL` started as a login shell, so **tab completion, abbreviations, aliases, autosuggestions, colours, your key bindings, your prompt and your history all work**, because your shell is doing them, not agnt's imitation of them. Anything that wants a terminal — an editor, a pager, `git commit` — works too. Every key in that mode belongs to the shell; `S-Tab` is the one agnt keeps, and it comes back to the task, still there half-typed. Wherever the shell ends up is where the next session starts — read from the operating system rather than asked of the shell, so it works whatever your shell is. (It is polled while the shell runs, since a shell that has exited can no longer be asked; a `cd` on the same line as `exit` is too brief to be seen.) `exit` gives the box back to the task prompt.
 
-  The box is a few rows tall — the line you are typing and the result of the command before it. It is a prompt, not a terminal to live in; more output than that scrolls, and the tail is what stays.
+  The box is as tall as the shell is using: one or two rows at an idle prompt, growing to fit a command's output and stopping at four to twelve rows by screen height. It is a prompt, not a terminal to live in; more output than that scrolls, and the tail is what stays.
 
 This replaced an earlier version that handed single lines to `$SHELL -c` and rebuilt the missing pieces — expanding abbreviations itself, appending a `$PWD` trailer to follow `cd`, probing the shell to find out whether it had understood. Each piece worked; together they were a worse terminal than the one already installed.
 
-Set `AGNT_SHELL` to run something other than `$SHELL`.
+**Which shell you get is the one the OS has on file for you** — what `chsh` set — not `$SHELL`. `$SHELL` is the conventional answer and it is wrong inside a development shell: `nix develop` exports its own bash as `$SHELL`, so agnt run that way would hand you bash however your own shell is set. `agnt doctor` prints the shell it will open, and says so when it is ignoring a `$SHELL` that disagrees. Set `AGNT_SHELL` to override both.
 
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
 

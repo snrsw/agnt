@@ -84,14 +84,15 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
     text.width().div_ceil(width).max(1)
 }
 
-/// How many rows of shell fit in the text area.
+/// The most rows of shell the text area will grow to.
 ///
-/// Enough for one command's output and the line being typed, not a terminal
-/// to live in: the list above it is what the screen is for. A command that
-/// prints more than this scrolls, and what stays is its tail, which is the
-/// part a prompt is usually consulted for.
-fn shell_rows(total_rows: u16) -> u16 {
-    (total_rows / 4).clamp(4, 10)
+/// A cap, not a height: the box is drawn as tall as the shell is actually
+/// using, so an idle prompt is one line. This is where it stops growing —
+/// enough for one command's output, after which the shell scrolls and the
+/// tail is what stays. It is a prompt, not a terminal to live in; the list
+/// above it is what the screen is for.
+fn shell_rows_cap(total_rows: u16) -> u16 {
+    (total_rows / 4).clamp(4, 12)
 }
 
 /// The size the embedded shell should be told it has, for a screen of this
@@ -99,7 +100,7 @@ fn shell_rows(total_rows: u16) -> u16 {
 /// right size rather than redrawing itself once.
 pub fn shell_area_size(area: Rect) -> (u16, u16) {
     let cols = area.width.saturating_sub(MARGIN * 2);
-    (shell_rows(area.height).max(1), cols.max(1))
+    (shell_rows_cap(area.height).max(1), cols.max(1))
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -111,7 +112,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // the shell's. Switching modes changes what is in the text area, not
     // where it is or how the screen is divided.
     let compose_h = if shell_open {
-        1 + shell_rows(area.height) + 1
+        // As tall as the shell is using, capped. An idle prompt is one line,
+        // and a command's output grows the box to fit — the same way the task
+        // prompt grows with the text typed into it.
+        let used = app.pty.as_ref().map_or(1, |p| p.used_rows());
+        1 + used.clamp(1, shell_rows_cap(area.height)) + 1
     } else {
         let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
         let grow_cap = ((area.height / 3).max(1) as usize).min(6);
@@ -825,31 +830,45 @@ mod tests {
         // Sized the way the loop sizes it, so the shell wraps its own output
         // to the box it is actually drawn in.
         let (rows, cols) = shell_area_size(Rect::new(0, 0, 100, 30));
-        app.open_shell(rows, cols, || {});
+        // A plain, fast shell: this is about the box, not about whose shell
+        // ends up in it.
+        app.open_shell(std::path::Path::new("/bin/sh"), rows, cols, || {});
         if app.pty.is_none() {
             eprintln!("no pty available here; skipping");
             return;
         }
 
-        // Wait for the prompt before typing, as a user would: typing into a
-        // shell that has not started yet is echoed by the tty rather than by
-        // the shell, and lands in a different place.
-        for _ in 0..100 {
+        // What the shell itself has drawn, which is what the box shows.
+        let shell_screen = |app: &App| -> String {
+            app.pty
+                .as_ref()
+                .and_then(|p| p.parser().lock().ok().map(|g| g.screen().contents()))
+                .unwrap_or_default()
+        };
+
+        // Wait for the shell's own prompt before typing, as a user would:
+        // keys sent to a shell that has not started yet are echoed by the tty
+        // rather than by the shell, and land somewhere else.
+        for _ in 0..200 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if !render(&app, 100, 30).trim().is_empty() && app.pty.as_ref().and_then(|p| p.cwd()).is_some() {
+            if !shell_screen(&app).trim().is_empty() {
                 break;
             }
         }
         app.pty.as_mut().unwrap().send(b"echo shell-canary\r");
-        let mut drawn = String::new();
-        for _ in 0..100 {
+
+        // Wait for the output, not merely the echo of what was typed.
+        for _ in 0..200 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            drawn = render(&app, 100, 30);
-            if drawn.contains("shell-canary") {
+            if shell_screen(&app).lines().any(|l| l.trim() == "shell-canary") {
                 break;
             }
         }
-        assert!(drawn.contains("shell-canary"), "{drawn}");
+        let drawn = render(&app, 100, 30);
+        assert!(
+            drawn.lines().any(|l| l.trim() == "shell-canary"),
+            "the shell's output never reached the text area\n{drawn}"
+        );
         // The list is still there above it, and agnt's own prompt is not.
         assert!(has(&drawn, "fix a flaky test"), "{drawn}");
         assert!(!drawn.contains("Describe a task for a new session"), "{drawn}");
@@ -866,16 +885,24 @@ mod tests {
             .collect();
         assert_eq!(rules.len(), 2, "expected one box, got {rules:?}\n{drawn}");
 
-        // And the line being typed is the box's last row, with the output
-        // above it — the prompt does not drift downward as commands run.
+        // The box is as tall as the shell is using: the prompt is its last
+        // row and there is no blank space padding it out.
         let (top, bottom) = (rules[0], rules[1]);
         assert!(
             !lines[bottom - 1].trim().is_empty(),
-            "the prompt is not on the bottom row\n{drawn}"
+            "the prompt is not on the box's last row\n{drawn}"
         );
+        for line in &lines[top + 1..bottom] {
+            assert!(!line.trim().is_empty(), "the box has blank rows\n{drawn}");
+        }
+        // The height follows the content rather than being a fixed block of
+        // mostly-blank rows. How many rows a shell uses for a prompt is the
+        // shell's business, so the bound is the cap, not an exact number.
+        let content_rows = bottom - top - 1;
         assert!(
-            lines[top + 1].trim().is_empty(),
-            "the shell was not pushed to the bottom\n{drawn}"
+            (1..=shell_rows_cap(30)).contains(&(content_rows as u16)),
+            "box is {content_rows} rows, outside 1..={}\n{drawn}",
+            shell_rows_cap(30)
         );
     }
 

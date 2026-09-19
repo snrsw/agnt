@@ -4,7 +4,7 @@
 //! file operations and happen inline.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -684,17 +684,23 @@ impl App {
     }
 
     /// Start the shell, or record why it could not start.
-    pub fn open_shell(&mut self, rows: u16, cols: u16, on_output: impl Fn() + Send + 'static) {
+    pub fn open_shell(
+        &mut self,
+        program: &Path,
+        rows: u16,
+        cols: u16,
+        on_output: impl Fn() + Send + 'static,
+    ) {
         if self.pty.is_some() {
             return;
         }
-        match PtyShell::spawn(&self.shell_cwd, rows.max(1), cols.max(1), on_output) {
+        match PtyShell::spawn(program, &self.shell_cwd, rows.max(1), cols.max(1), on_output) {
             Ok(pty) => {
                 self.pty = Some(pty);
                 self.notice = None;
             }
             Err(e) => {
-                self.notice = Some(format!("could not start {}: {e}", shell::program().display()));
+                self.notice = Some(format!("could not start {}: {e}", program.display()));
                 self.input_mode = InputMode::Task;
             }
         }
@@ -1306,7 +1312,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 Effect::StartShell => {
                     let tx = ev_tx.clone();
                     let (rows, cols) = ui::shell_area_size(guard.terminal().size()?.into());
-                    app.open_shell(rows, cols, move || {
+                    app.open_shell(&shell::program(), rows, cols, move || {
                         // A blocking send would deadlock the reader thread
                         // against a full channel; a dropped redraw is
                         // harmless, because the next one carries the screen.
@@ -2013,10 +2019,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.input_mode = InputMode::Shell;
-        // SAFETY: single-threaded test, before any thread reads the value.
-        unsafe { std::env::set_var("AGNT_SHELL", "/nonexistent/definitely-not-a-shell") };
-        app.open_shell(24, 80, || {});
-        unsafe { std::env::remove_var("AGNT_SHELL") };
+        app.open_shell(Path::new("/nonexistent/definitely-not-a-shell"), 24, 80, || {});
 
         assert!(app.pty.is_none());
         assert_eq!(app.input_mode, InputMode::Task);
@@ -2035,7 +2038,7 @@ mod tests {
         app.shell_cwd = dir.path().to_path_buf();
 
         assert_eq!(app.handle_key(code(KeyCode::BackTab)), vec![Effect::StartShell]);
-        app.open_shell(24, 80, || {});
+        app.open_shell(Path::new("/bin/sh"), 24, 80, || {});
         if app.pty.is_none() {
             eprintln!("no pty available here; skipping");
             return;
@@ -2089,7 +2092,7 @@ mod tests {
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
         app.input_mode = InputMode::Shell;
-        app.open_shell(24, 80, || {});
+        app.open_shell(Path::new("/bin/sh"), 24, 80, || {});
         if app.pty.is_none() {
             eprintln!("no pty available here; skipping");
             return;

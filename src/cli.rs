@@ -363,6 +363,18 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
         ),
         Err(e) => println!("metadata: ✗ {e}"),
     }
+    // Which shell Shift+Tab will open, and why. `$SHELL` is shown when it
+    // disagrees, because a development shell rewrites it and the difference
+    // is otherwise invisible until the wrong prompt appears.
+    let shell = crate::shell::program();
+    print!("shell: {}", shell.display());
+    match std::env::var("SHELL") {
+        Ok(env) if std::path::Path::new(&env) != shell => {
+            println!(" (ignoring $SHELL={env}; set AGNT_SHELL to override)")
+        }
+        _ => println!(),
+    }
+
     match CacheStore::new(paths).load() {
         Some(c) => println!(
             "cache: {} rows, saved {}",

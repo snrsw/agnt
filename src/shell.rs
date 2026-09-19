@@ -35,17 +35,47 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 /// How much of the shell's scrollback the emulator keeps.
 pub const SCROLLBACK: usize = 1000;
 
-/// Which shell to run: `AGNT_SHELL`, else `$SHELL`, else `/bin/sh`.
+/// Which shell to run: `AGNT_SHELL`, else the user's login shell, else
+/// `$SHELL`, else `/bin/sh`.
 ///
-/// No shell-specific syntax is generated any more, so this needs no
-/// knowledge of what the shell is — it only has to be something that can run
-/// on a terminal.
+/// `$SHELL` would be the conventional first choice, and it is the wrong one
+/// here. A development shell rewrites it: inside `nix develop`, `$SHELL` is
+/// the bash that nix provides, so agnt built and run that way would hand the
+/// user bash however their own shell is set. The operating system's answer is
+/// the one `chsh` wrote and no wrapper rewrites, so it is asked first.
+///
+/// No shell-specific syntax is generated any more, so this needs no knowledge
+/// of what the shell is — it only has to be something that runs on a terminal.
 pub fn program() -> PathBuf {
-    std::env::var_os("AGNT_SHELL")
-        .or_else(|| std::env::var_os("SHELL"))
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
+    if let Some(explicit) = std::env::var_os("AGNT_SHELL").filter(|s| !s.is_empty()) {
+        return PathBuf::from(explicit);
+    }
+    login_shell()
+        .or_else(|| {
+            std::env::var_os("SHELL")
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
+}
+
+/// The shell the operating system has on file for this user — what `chsh`
+/// set, and what a terminal starts.
+///
+/// On macOS this is not in `/etc/passwd`; it lives in the directory service,
+/// and `getpwuid` is what reads it on both platforms.
+fn login_shell() -> Option<PathBuf> {
+    // SAFETY: `getpwuid` returns a pointer into storage owned by libc, valid
+    // until the next passwd call. It is read and copied immediately, and no
+    // other passwd call happens in between.
+    let shell = unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_shell.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_shell).to_str().ok()?.to_owned()
+    };
+    (!shell.is_empty()).then(|| PathBuf::from(shell))
 }
 
 /// A running shell on a pseudo-terminal, and the screen it has drawn.
@@ -66,12 +96,17 @@ impl std::fmt::Debug for PtyShell {
 }
 
 impl PtyShell {
-    /// Start the shell on a pty of the given size, in `cwd`.
+    /// Start `program` on a pty of the given size, in `cwd`.
+    ///
+    /// Which shell that is comes from [`program()`]; it is passed in rather
+    /// than resolved here so a test can ask for a fast, predictable one
+    /// without rewriting the environment other tests are reading.
     ///
     /// `on_output` is called whenever the shell writes something, so the
     /// event loop can redraw. The shell is started as a login shell so the
     /// user's configuration is the one they would get in a terminal.
     pub fn spawn(
+        program: &Path,
         cwd: &Path,
         rows: u16,
         cols: u16,
@@ -87,8 +122,7 @@ impl PtyShell {
             .openpty(size)
             .map_err(std::io::Error::other)?;
 
-        let shell = program();
-        let mut cmd = CommandBuilder::new(&shell);
+        let mut cmd = CommandBuilder::new(program);
         cmd.cwd(cwd);
         // A login shell, because that is what the user's terminal gives them
         // and therefore what their configuration expects.
@@ -104,15 +138,7 @@ impl PtyShell {
         let pid = child.process_id();
         drop(pair.slave);
 
-        // Start the cursor on the last row, before the shell has written
-        // anything, so its first prompt is drawn at the bottom of the box and
-        // every later one is too. A terminal fills from the top and only
-        // reaches the bottom once it has scrolled; in a box this small that
-        // would mean the line being typed drifts downward for the first few
-        // commands. Pre-scrolling costs nothing and holds it still.
-        let mut vt = vt100::Parser::new(rows, cols, SCROLLBACK);
-        vt.process(&b"\r\n".repeat(rows.saturating_sub(1) as usize));
-        let parser = Arc::new(Mutex::new(vt));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
         let mut reader = pair.master.try_clone_reader().map_err(std::io::Error::other)?;
 
@@ -144,6 +170,23 @@ impl PtyShell {
             pid,
             size: (rows, cols),
         })
+    }
+
+    /// How many rows of the shell's screen have anything in them.
+    ///
+    /// The text area is drawn this tall, so an idle shell is one line and a
+    /// command's output grows the box to fit — the way the task prompt grows
+    /// with the text typed into it. A terminal fills from the top, so this is
+    /// the row the cursor is on, or the last row with content if a program
+    /// has left the cursor above its own output.
+    pub fn used_rows(&self) -> u16 {
+        let Ok(parser) = self.parser.lock() else {
+            return 1;
+        };
+        let screen = parser.screen();
+        let (cursor_row, _) = screen.cursor_position();
+        let written = screen.contents().lines().count() as u16;
+        cursor_row.saturating_add(1).max(written).max(1).min(self.size.0)
     }
 
     /// The screen, for rendering. Held only as long as the draw takes.
@@ -305,12 +348,26 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// `$SHELL` is not the answer: a development shell rewrites it. The
+    /// operating system's record of the user's shell is, and an explicit
+    /// `AGNT_SHELL` beats both.
     #[test]
-    fn the_shell_is_agnt_shell_then_shell() {
-        // Only the resolution order is asserted; the environment belongs to
-        // whoever is running the tests.
-        let resolved = program();
-        assert!(resolved.is_absolute() || resolved.components().count() == 1);
+    fn the_shell_is_the_users_own_not_whatever_rewrote_shell() {
+        let os = login_shell().expect("the OS should know this user's shell");
+        assert!(os.is_absolute(), "{os:?}");
+
+        // SAFETY: single-threaded test. `program()` is called nowhere else in
+        // the suite — every other test is handed its shell — so nothing races
+        // on this.
+        unsafe { std::env::set_var("AGNT_SHELL", "/bin/sh") };
+        assert_eq!(program(), PathBuf::from("/bin/sh"));
+        unsafe { std::env::remove_var("AGNT_SHELL") };
+
+        // With no override, `$SHELL` loses to the OS. This is the `nix
+        // develop` case: it exports its own bash as `$SHELL`.
+        unsafe { std::env::set_var("SHELL", "/definitely/not/the/users/shell") };
+        assert_eq!(program(), os);
+        unsafe { std::env::remove_var("SHELL") };
     }
 
     #[test]
@@ -361,7 +418,7 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
 
-        let mut shell = match PtyShell::spawn(dir.path(), 24, 80, || {}) {
+        let mut shell = match PtyShell::spawn(Path::new("/bin/sh"), dir.path(), 24, 80, || {}) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("no pty available here ({e}); skipping");
