@@ -1,10 +1,17 @@
 //! The one-line shell behind the prompt's shell mode.
 //!
-//! Commands run through the user's own shell so their functions, `PATH` and
+//! Commands run through `$SHELL` so the user's functions, `PATH` and
 //! environment are the ones they expect. Two things that shell would do for
 //! them at a terminal have to be done here instead, because there is no
 //! terminal: abbreviations are expanded, and the directory the shell ends in
 //! is read back.
+//!
+//! Reading the directory back needs a line of the shell's own syntax, and
+//! that is the one thing that cannot be written once for every shell. Rather
+//! than assume, agnt **probes** the shell at startup with a command whose
+//! answer it knows. A shell that does not answer correctly still runs
+//! commands; it only loses the directory tracking, and says so. So an
+//! unfamiliar `$SHELL` degrades instead of breaking.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +40,24 @@ const ABBR_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ShellKind {
     Fish,
     Posix,
+}
+
+/// Whether the shell answered the directory probe. Assumed nothing until it
+/// has been run: a shell is only known to work once it has been seen to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tracking {
+    /// The trailer came back and the exit status was the command's.
+    Works,
+    /// The shell did not answer. Commands still run; `cd` does not persist.
+    #[default]
+    Unavailable,
+}
+
+/// What the shell told us about itself at startup.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShellInfo {
+    pub abbrs: BTreeMap<String, Abbreviation>,
+    pub tracking: Tracking,
 }
 
 /// An abbreviation or alias: text the shell's line editor would have expanded
@@ -88,19 +113,30 @@ impl Shell {
         format!("{line}\n{save}\nprintf '\\n{PWD_MARKER}%s\\n' \"$PWD\"\nexit $__agnt_s")
     }
 
-    /// Environment that keeps these commands out of the user's history. The
-    /// prompt is for getting somewhere, not a session anyone wants to scroll
-    /// back through later, and silently filling a history file with it would
-    /// be rude.
+    /// Flags that keep these commands out of the user's history. The prompt
+    /// is for getting somewhere, not a session anyone wants to scroll back
+    /// through later, and silently filling a history file with it would be
+    /// rude.
+    ///
+    /// Fish has a documented flag for it. Everything else is asked through
+    /// the environment, which is what POSIX shells read.
+    pub fn history_flags(&self) -> Vec<&'static str> {
+        match self.kind {
+            ShellKind::Fish => vec!["--private"],
+            ShellKind::Posix => vec![],
+        }
+    }
+
     pub fn history_env(&self) -> Vec<(&'static str, &'static str)> {
         match self.kind {
-            ShellKind::Fish => vec![("fish_private_mode", "1")],
+            ShellKind::Fish => vec![],
             ShellKind::Posix => vec![("HISTFILE", "/dev/null"), ("HISTSIZE", "0")],
         }
     }
 
     fn command(&self, cwd: &Path, script: &str, interactive: bool) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.program);
+        cmd.args(self.history_flags());
         if interactive {
             // Abbreviations and aliases are usually defined behind an
             // "is this interactive?" guard, so listing them needs a shell
@@ -120,8 +156,16 @@ impl Shell {
 
     /// Run one line: captured stdout and stderr, and whether it succeeded.
     /// Stdin is closed so nothing can wait on input.
-    pub async fn run(&self, cwd: &Path, line: &str) -> (String, String, bool) {
-        let mut cmd = self.command(cwd, &self.script(line), false);
+    ///
+    /// A shell that failed the probe is handed the bare line. Appending a
+    /// trailer it does not understand would turn every command into a syntax
+    /// error, which is a far worse failure than losing `cd`.
+    pub async fn run(&self, cwd: &Path, line: &str, tracking: Tracking) -> (String, String, bool) {
+        let script = match tracking {
+            Tracking::Works => self.script(line),
+            Tracking::Unavailable => line.to_string(),
+        };
+        let mut cmd = self.command(cwd, &script, false);
         match tokio::time::timeout(TIMEOUT, cmd.output()).await {
             Ok(Ok(out)) => (
                 String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -141,6 +185,38 @@ impl Shell {
                 ),
                 false,
             ),
+        }
+    }
+
+    /// Ask the shell everything agnt needs to know about it, in one go:
+    /// whether it can report its directory back, and what abbreviations it
+    /// has. Both cost a shell start, so they happen once, together, the
+    /// first time shell mode is opened.
+    pub async fn interrogate(&self, cwd: &Path) -> ShellInfo {
+        let tracking = self.probe(cwd).await;
+        ShellInfo {
+            abbrs: self.load_abbreviations(cwd).await,
+            tracking,
+        }
+    }
+
+    /// Run a command whose answer is known, and see whether the shell gives
+    /// it. `false` fails, so a shell that understood the trailer reports the
+    /// failure *and* prints the marker — which is both halves of what the
+    /// trailer is for. Anything else, from a syntax error to a shell that
+    /// spells `$?` differently, comes back wrong and is taken as unusable.
+    pub async fn probe(&self, cwd: &Path) -> Tracking {
+        let mut cmd = self.command(cwd, &self.script("false"), false);
+        let Ok(Ok(out)) = tokio::time::timeout(ABBR_TIMEOUT, cmd.output()).await else {
+            return Tracking::Unavailable;
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (_, pwd) = split_pwd_marker(&stdout);
+        let reported = pwd.is_some_and(|p| p.is_dir());
+        if reported && !out.status.success() {
+            Tracking::Works
+        } else {
+            Tracking::Unavailable
         }
     }
 
@@ -351,8 +427,7 @@ mod tests {
 
     #[test]
     fn history_is_off_in_both_families() {
-        let fish = Shell::at("/usr/bin/fish").history_env();
-        assert_eq!(fish, vec![("fish_private_mode", "1")]);
+        assert_eq!(Shell::at("/usr/bin/fish").history_flags(), vec!["--private"]);
         let posix = Shell::at("/bin/bash").history_env();
         assert!(posix.contains(&("HISTFILE", "/dev/null")));
     }
@@ -460,9 +535,16 @@ mod tests {
             shells.push(Shell::at(fish));
         }
         for shell in shells {
-            let (_, _, ok) = shell.run(dir.path(), "cd nope-not-here").await;
+            // Each real shell must pass its own probe, history flags and all.
+            assert_eq!(
+                shell.probe(dir.path()).await,
+                Tracking::Works,
+                "{:?} failed its own probe",
+                shell.program
+            );
+            let (_, _, ok) = shell.run(dir.path(), "cd nope-not-here", Tracking::Works).await;
             assert!(!ok, "{:?}: a failed cd must not read as success", shell.program);
-            let (stdout, _, ok) = shell.run(dir.path(), "echo fine").await;
+            let (stdout, _, ok) = shell.run(dir.path(), "echo fine", Tracking::Works).await;
             assert!(ok, "{:?}", shell.program);
             let (out, pwd) = split_pwd_marker(&stdout);
             assert_eq!(out.trim(), "fine", "{:?}", shell.program);
@@ -473,6 +555,87 @@ mod tests {
                 shell.program
             );
         }
+    }
+
+    /// A shell whose syntax agnt does not speak must degrade, not break: the
+    /// probe says no, and the bare line still runs.
+    #[tokio::test]
+    async fn an_unfamiliar_shell_loses_tracking_but_still_runs_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in for nushell and friends: it runs a command, but knows
+        // nothing of `$?`, `set` or `exit`, so the trailer cannot work.
+        let fake = dir.path().join("weird-shell");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\n# Ignores everything but the first line of the script.\nprintf '%s\\n' \"$2\" | head -1 | /bin/sh\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let shell = Shell::at(&fake);
+        assert_eq!(shell.probe(dir.path()).await, Tracking::Unavailable);
+
+        // And the command itself still runs, without the trailer.
+        let (stdout, _, _) = shell
+            .run(dir.path(), "echo still-works", Tracking::Unavailable)
+            .await;
+        assert!(stdout.contains("still-works"), "{stdout:?}");
+        assert!(!stdout.contains(PWD_MARKER), "{stdout:?}");
+    }
+
+    /// Nothing typed here reaches the user's shell history. Asserted against
+    /// a real shell and a throwaway HOME rather than by reading the flags
+    /// back, because the flags are only worth having if the file stays clean.
+    #[tokio::test]
+    async fn commands_do_not_reach_the_history_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let needle = "agnt-history-canary-9f3a";
+
+        let mut shells = vec![Shell::at("/bin/sh")];
+        for name in ["fish", "bash", "zsh"] {
+            if let Some(p) = crate::providers::process::find_in_path(name) {
+                shells.push(Shell::at(p));
+            }
+        }
+
+        for shell in shells {
+            let mut cmd = shell.command(dir.path(), &shell.script(&format!("echo {needle}")), false);
+            cmd.env("HOME", &home)
+                .env("XDG_DATA_HOME", home.join(".local/share"))
+                .env("XDG_CONFIG_HOME", home.join(".config"));
+            let out = cmd.output().await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains(needle),
+                "{:?} did not run the command",
+                shell.program
+            );
+        }
+
+        // Whatever any of them wrote under the throwaway home, none of it may
+        // be the command.
+        let mut checked = 0usize;
+        let mut stack = vec![home.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if let Ok(text) = std::fs::read_to_string(&path) {
+                    assert!(!text.contains(needle), "{} recorded the command", path.display());
+                    checked += 1;
+                }
+            }
+        }
+        let _ = checked;
     }
 
     /// The listing has to run interactively, because that is the only shell

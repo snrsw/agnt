@@ -19,7 +19,7 @@ use crate::model::{
 use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
-use crate::shell::{self, Abbreviation, Shell};
+use crate::shell::{self, Shell, ShellInfo, Tracking};
 use crate::storage::{CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
 use crate::ui;
@@ -57,8 +57,8 @@ pub enum AppEvent {
         stderr: String,
         ok: bool,
     },
-    /// The shell answered with its abbreviations, or aliases.
-    Abbreviations(BTreeMap<String, Abbreviation>),
+    /// The shell answered: what it can do, and what abbreviations it has.
+    ShellReady(ShellInfo),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +169,9 @@ pub enum Effect {
     },
     /// Run a shell-mode line in the user's shell, from the current directory.
     RunShell(String),
-    /// Ask the shell for its abbreviations. Sent once, on first use.
-    LoadAbbreviations,
+    /// Ask the shell what it can do and what abbreviations it has. Sent
+    /// once, on first use.
+    InterrogateShell,
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
     RunPlan(Box<AttachPlan>),
@@ -256,9 +257,9 @@ pub struct App {
     pub notice: Option<String>,
     /// The shell commands run in, and what it calls its abbreviations.
     pub shell: Shell,
-    /// The user's abbreviations, once the shell has been asked for them.
-    /// `None` until the answer arrives; agnt expands them itself.
-    pub abbrs: Option<BTreeMap<String, Abbreviation>>,
+    /// What the shell said about itself, once asked. `None` until the answer
+    /// arrives, which is also how "not asked yet" is spelled.
+    pub shell_info: Option<ShellInfo>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -305,7 +306,7 @@ impl App {
             shell_output: Vec::new(),
             shell_busy: false,
             shell: Shell::detect(),
-            abbrs: None,
+            shell_info: None,
             notice: None,
             store,
             cache,
@@ -745,8 +746,8 @@ impl App {
         // Expand the way the shell's line editor would have, and echo what
         // will actually run rather than what was typed — an abbreviation the
         // user cannot see the expansion of is a trap.
-        let line = match &self.abbrs {
-            Some(abbrs) => shell::expand(&line, abbrs),
+        let line = match &self.shell_info {
+            Some(info) => shell::expand(&line, &info.abbrs),
             None => line,
         };
         self.notice = None;
@@ -1019,10 +1020,10 @@ impl App {
                 InputMode::Shell => InputMode::Task,
             };
             self.notice = None;
-            // Listing abbreviations starts a shell, so it waits until the
-            // first time shell mode is actually opened.
-            if self.input_mode == InputMode::Shell && self.abbrs.is_none() {
-                return vec![Effect::LoadAbbreviations];
+            // Asking the shell starts a shell, so it waits until the first
+            // time shell mode is actually opened.
+            if self.input_mode == InputMode::Shell && self.shell_info.is_none() {
+                return vec![Effect::InterrogateShell];
             }
             return Vec::new();
         }
@@ -1209,7 +1210,17 @@ impl App {
                 result,
             } => self.apply_stopped(key, then_hide, result),
             AppEvent::ShellDone { stdout, stderr, ok } => self.apply_shell_done(stdout, stderr, ok),
-            AppEvent::Abbreviations(abbrs) => self.abbrs = Some(abbrs),
+            AppEvent::ShellReady(info) => {
+                // Say it once, plainly: an unfamiliar shell runs commands but
+                // cannot report where it ended up, so `cd` will not stick.
+                if info.tracking == Tracking::Unavailable {
+                    self.push_shell_output(format!(
+                        "({} cannot report its directory back, so cd will not persist here. Set AGNT_SHELL to bash, zsh or fish for that.)",
+                        self.shell.program.display()
+                    ));
+                }
+                self.shell_info = Some(info);
+            }
         }
     }
 }
@@ -1399,18 +1410,19 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                     let tx = ev_tx.clone();
                     let shell = app.shell.clone();
                     let cwd = app.shell_cwd.clone();
+                    let tracking = app.shell_info.as_ref().map(|i| i.tracking).unwrap_or_default();
                     tokio::spawn(async move {
-                        let (stdout, stderr, ok) = shell.run(&cwd, &line).await;
+                        let (stdout, stderr, ok) = shell.run(&cwd, &line, tracking).await;
                         let _ = tx.send(AppEvent::ShellDone { stdout, stderr, ok }).await;
                     });
                 }
-                Effect::LoadAbbreviations => {
+                Effect::InterrogateShell => {
                     let tx = ev_tx.clone();
                     let shell = app.shell.clone();
                     let cwd = app.shell_cwd.clone();
                     tokio::spawn(async move {
-                        let abbrs = shell.load_abbreviations(&cwd).await;
-                        let _ = tx.send(AppEvent::Abbreviations(abbrs)).await;
+                        let info = shell.interrogate(&cwd).await;
+                        let _ = tx.send(AppEvent::ShellReady(info)).await;
                     });
                 }
                 Effect::Start {
@@ -1450,6 +1462,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
 mod tests {
     use super::*;
     use crate::model::{Operation, View, WorkflowState};
+    use crate::shell::Abbreviation;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -2131,7 +2144,9 @@ mod tests {
         app.input_mode = InputMode::Shell;
 
         let sh = Shell::at("/bin/sh");
-        let (stdout, stderr, ok) = sh.run(dir.path(), "cd sub && echo inside && pwd").await;
+        let (stdout, stderr, ok) = sh
+            .run(dir.path(), "cd sub && echo inside && pwd", Tracking::Works)
+            .await;
         assert!(ok, "{stderr}");
         app.apply_shell_done(stdout, stderr, ok);
 
@@ -2161,7 +2176,7 @@ mod tests {
         app.shell_cwd = dir.path().to_path_buf();
 
         let sh = Shell::at("/bin/sh");
-        let (stdout, stderr, ok) = sh.run(dir.path(), "cd nope-not-here").await;
+        let (stdout, stderr, ok) = sh.run(dir.path(), "cd nope-not-here", Tracking::Works).await;
         assert!(!ok);
         app.apply_shell_done(stdout, stderr, ok);
         // Unchanged, and in the spelling it was given, not the shell's.
@@ -2173,7 +2188,7 @@ mod tests {
         );
 
         // A command that exits the shell leaves no trailer: directory unchanged.
-        let (stdout, _, _) = sh.run(dir.path(), "exit 3").await;
+        let (stdout, _, _) = sh.run(dir.path(), "exit 3", Tracking::Works).await;
         assert_eq!(shell::split_pwd_marker(&stdout).1, None);
     }
 
@@ -2184,8 +2199,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.input_mode = InputMode::Shell;
-        app.abbrs = Some(
-            [(
+        app.shell_info = Some(ShellInfo {
+            abbrs: [(
                 "ls".to_string(),
                 Abbreviation {
                     expansion: "eza --icons --git".into(),
@@ -2194,7 +2209,8 @@ mod tests {
             )]
             .into_iter()
             .collect(),
-        );
+            tracking: Tracking::Works,
+        });
         for c in "ls -la".chars() {
             app.handle_key(key(c));
         }
@@ -2206,25 +2222,40 @@ mod tests {
         );
     }
 
-    /// Opening shell mode asks the shell for its abbreviations, once.
+    /// Opening shell mode asks the shell about itself, once.
     #[test]
-    fn the_abbreviations_are_requested_on_first_use_only() {
+    fn the_shell_is_asked_about_itself_on_first_use_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         assert_eq!(
             app.handle_key(code(KeyCode::BackTab)),
-            vec![Effect::LoadAbbreviations]
+            vec![Effect::InterrogateShell]
         );
         app.handle_key(code(KeyCode::BackTab));
         // Still pending: asking again would start another shell.
         assert_eq!(
             app.handle_key(code(KeyCode::BackTab)),
-            vec![Effect::LoadAbbreviations]
+            vec![Effect::InterrogateShell]
         );
 
-        app.handle_app_event(AppEvent::Abbreviations(BTreeMap::new()));
+        app.handle_app_event(AppEvent::ShellReady(ShellInfo {
+            abbrs: BTreeMap::new(),
+            tracking: Tracking::Works,
+        }));
         app.handle_key(code(KeyCode::BackTab));
         assert!(app.handle_key(code(KeyCode::BackTab)).is_empty());
+    }
+
+    /// A shell that cannot report its directory says so once, in the pane,
+    /// rather than leaving the user to wonder why `cd` does nothing.
+    #[test]
+    fn an_unusable_shell_says_so_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.handle_app_event(AppEvent::ShellReady(ShellInfo::default()));
+        let said = app.shell_output.join("\n");
+        assert!(said.contains("cd will not persist"), "{said}");
+        assert!(said.contains("AGNT_SHELL"), "{said}");
     }
 
     #[test]

@@ -53,7 +53,9 @@ The task text is the only thing you have to type. Because every printable key be
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
 - **`S-Tab` switches the text area to a shell.** Each line runs in your `$SHELL` from the current directory, output appears in a pane above the prompt, and the directory the shell ends in is where the next session starts — so `cd` works the way it does anywhere, `cd foo && ls` included. `Tab` completes paths. `S-Tab` again comes back to the task, still there half-typed. **Your abbreviations and aliases work**, and agnt is the one expanding them: they are features of the shell's line editor, so nothing expands them for a command handed to `-c`, and in a generated config they are usually only *defined* for an interactive shell in the first place. agnt asks your shell for its `abbr --show` (or `alias`) once, and expands command-position words itself — the pane echoes what actually ran, so an abbreviation is never invisible. **Nothing goes into your shell history** (`fish_private_mode`, or `HISTFILE=/dev/null`).
 
-Set `AGNT_SHELL` to use something other than `$SHELL`.
+**On an unfamiliar shell it degrades rather than breaking.** Reading the directory back needs one line of the shell's own syntax, and that is the one thing that cannot be written once for everybody — nushell and PowerShell spell it nothing like bash does. So agnt probes your shell at startup with a command whose answer it knows. If the answer is wrong, commands still run; only `cd` stops sticking, and the pane says so. bash, zsh, fish and sh are all verified by the test suite.
+
+Set `AGNT_SHELL` to use something other than `$SHELL` — that is the escape hatch if your login shell is one of the ones that cannot report back.
 
 Commands run without a terminal of their own: stdin is closed and output is captured, so an editor or a pager won't work there, and anything still running after a minute is killed.
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
