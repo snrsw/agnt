@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use chrono::{DateTime, Utc};
 
-use crate::app::{App, GroupHeader, ListRow, Mode};
+use crate::app::{App, GroupHeader, InputMode, ListRow, Mode};
 use std::collections::BTreeMap;
 
 use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, text};
@@ -84,25 +84,50 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
     text.width().div_ceil(width).max(1)
 }
 
+/// How tall the shell pane is for a given screen: a rule, then the terminal.
+/// Half the screen, which is enough for a `git log` or a build without
+/// hiding the list that the shell is there to serve.
+fn shell_pane_rows(total_rows: u16) -> u16 {
+    (total_rows / 2).clamp(6, 30)
+}
+
+/// The size the embedded shell should be told it has, for a screen of this
+/// size. Needed before the first frame is drawn, so the shell starts at the
+/// right size rather than redrawing itself once.
+pub fn shell_pane_size(area: Rect) -> (u16, u16) {
+    let rows = shell_pane_rows(area.height).saturating_sub(1);
+    let cols = area.width.saturating_sub(MARGIN * 2);
+    (rows.max(1), cols.max(1))
+}
+
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
-    // The input grows with the task instead of truncating it, up to a third
-    // of the screen. A pasted path should be readable, not clipped.
-    let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-    let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
-    // A rule above and below: the prompt is a box, not another list row.
-    let compose_h = 1 + input_h + 1 + 1;
+    let shell_open = app.input_mode == InputMode::Shell && app.pty.is_some();
+
+    // In shell mode the shell replaces agnt's own prompt: it has a prompt of
+    // its own, and two prompts on one screen is one too many.
+    let (compose_h, shell_h) = if shell_open {
+        (0, shell_pane_rows(area.height))
+    } else {
+        let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
+        let grow_cap = ((area.height / 3).max(1) as usize).min(6);
+        let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
+        (1 + input_h + 1 + 1, 0)
+    };
 
     // Detail line, then any problems, then the key hint. The detail line is
     // always there — blank when nothing is selected — so the cursor moving
     // never changes the height of anything.
-    let status_h = 2 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
+    let status_h = 2
+        + u16::from(app.metadata_error.is_some())
+        + u16::from(app.has_provider_problem())
+        + u16::from(app.notice.is_some());
 
-    let [header, body, compose, status] = Layout::vertical([
+    let [header, body, shell, compose, status] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(3),
+        Constraint::Length(shell_h),
         Constraint::Length(compose_h),
         Constraint::Length(status_h),
     ])
@@ -110,12 +135,43 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, header, app);
     draw_table(frame, body, app);
-    draw_compose(frame, compose, app);
+    if shell_h > 0 {
+        draw_shell_pane(frame, shell, app);
+    }
+    if compose_h > 0 {
+        draw_compose(frame, compose, app);
+    }
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
 }
 
-/// Three lines and a gap, the shape the agent view uses: what this is, where
+/// The embedded shell's screen, drawn as the terminal it is.
+///
+/// Nothing here interprets the content: `vt100` has already turned the
+/// shell's output into a grid of cells, colours and all, and `tui-term`
+/// draws that grid. The shell's own cursor is placed on the real terminal
+/// so it blinks where the user is typing.
+fn draw_shell_pane(frame: &mut Frame, outer: Rect, app: &App) {
+    let block = Block::default().borders(Borders::TOP).border_style(theme::rule());
+    let area = with_margin(block.inner(outer));
+    frame.render_widget(block, outer);
+
+    let Some(pty) = app.pty.as_ref() else {
+        return;
+    };
+    let Ok(parser) = pty.parser().lock() else {
+        return;
+    };
+    let screen = parser.screen();
+    frame.render_widget(tui_term::widget::PseudoTerminal::new(screen), area);
+
+    if !screen.hide_cursor() {
+        let (row, col) = screen.cursor_position();
+        frame.set_cursor_position((area.x + col, area.y + row));
+    }
+}
+
+/// Three lines and a gap, the shape the agent view uses:/// Three lines and a gap, the shape the agent view uses: what this is, where
 /// it is pointed, and what is in it.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let area = with_margin(area);
@@ -565,6 +621,10 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let detail = app.selected_view().map(|v| detail_text(&v)).unwrap_or_default();
     lines.push(Line::from(text::truncate_to_width(&detail, width)));
 
+    if let Some(notice) = &app.notice {
+        lines.push(Line::from(text::truncate_to_width(notice, width)));
+    }
+
     if let Some(err) = &app.metadata_error {
         lines.push(Line::from(text::truncate_to_width(
             &format!("metadata editing disabled: {}", text::sanitize(err)),
@@ -578,10 +638,16 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
         )));
     }
 
-    let hint = if !app.draft.buffer.trim().is_empty() {
-        "enter to start · tab for agent · esc to clear"
-    } else {
-        "type to start a session · enter to attach · shift-tab for a shell · ? for shortcuts"
+    let hint = match app.input_mode {
+        // Every other key belongs to the shell, so the only one worth naming
+        // is the one that comes back.
+        InputMode::Shell => "shift-tab back to the list · the shell has every other key",
+        InputMode::Task if !app.draft.buffer.trim().is_empty() => {
+            "enter to start · tab for agent · esc to clear"
+        }
+        InputMode::Task => {
+            "type to start a session · enter to attach · shift-tab for a shell · ? for shortcuts"
+        }
     };
     lines.push(Line::from(text::truncate_to_width(hint, width)));
 
@@ -618,7 +684,9 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "enter           start it, or attach to the selected row when the prompt is empty".into(),
                 "up / down       move".into(),
                 "tab             the new session's agent".into(),
-                "shift-tab       drop into your shell; where you leave it is where the next session starts".into(),
+                "shift-tab       open your shell in a pane, and come back from it".into(),
+                "                it is a real terminal: completion, abbreviations and history".into(),
+                "                are your shell's. Where it ends up is where a session starts.".into(),
                 "".into(),
                 "ctrl+t          cycle view: status, repository, workflow".into(),
                 "ctrl+f          search".into(),
@@ -737,6 +805,48 @@ mod tests {
             .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The pane draws the shell's actual screen, and the prompt is gone
+    /// while it is open — the shell has one of its own.
+    #[tokio::test]
+    async fn the_shell_pane_draws_what_the_shell_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session("a", "fix a flaky test", RuntimeState::Idle)]);
+        app.shell_cwd = dir.path().to_path_buf();
+        app.input_mode = crate::app::InputMode::Shell;
+        // Sized the way the loop sizes it, so the shell wraps its own output
+        // to the pane it is actually drawn in.
+        let (rows, cols) = shell_pane_size(Rect::new(0, 0, 100, 30));
+        app.open_shell(rows, cols, || {});
+        if app.pty.is_none() {
+            eprintln!("no pty available here; skipping");
+            return;
+        }
+
+        // Wait for the prompt before typing, as a user would: typing into a
+        // shell that has not started yet is echoed by the tty rather than by
+        // the shell, and lands in a different place.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !render(&app, 100, 30).trim().is_empty() && app.pty.as_ref().and_then(|p| p.cwd()).is_some() {
+                break;
+            }
+        }
+        app.pty.as_mut().unwrap().send(b"echo pane-canary\r");
+        let mut drawn = String::new();
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drawn = render(&app, 100, 30);
+            if drawn.contains("pane-canary") {
+                break;
+            }
+        }
+        assert!(drawn.contains("pane-canary"), "{drawn}");
+        // The list is still there above it, and agnt's own prompt is not.
+        assert!(has(&drawn, "fix a flaky test"), "{drawn}");
+        assert!(!drawn.contains("Describe a task for a new session"), "{drawn}");
+        assert!(drawn.contains("shift-tab back to the list"), "{drawn}");
     }
 
     /// Wide characters occupy two cells and column padding varies with the

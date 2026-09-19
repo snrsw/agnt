@@ -23,7 +23,7 @@ The name is settled. Rust, JSON, and a preference for official integration are t
 | R04 | Sorts by status | Toggle between execution state and manual work classification | Things like waiting-for-approval can be shown first |
 | R05 | Shows PRs and issues | Explicit URL registration plus GitHub enrichment | The related number and kind appear in the list |
 | R06 | Deletes a session | Hide from the list, restorable | It does not come back on refetch, and it is clear that history remains |
-| R07 | Starts in any directory | Walk there in the embedded shell, or `agnt new --cwd` | Paths outside git, with spaces, or with non-ASCII characters all work |
+| R07 | Starts in any directory | The embedded shell, or `agnt new --cwd` | Paths outside git, with spaces, or with non-ASCII characters all work |
 | R08 | Fast | Separate drawing from external I/O | The provisional performance targets in section 11 are measured |
 | R09 | Work continues after returning to the list | Prefer the official runtime | A long-running task is not interrupted, and the list can reattach to it |
 
@@ -135,7 +135,7 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 | Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
 | Up / Down | Move between rows, wrapping at both ends |
 | Tab | The new session's agent |
-| Shift+Tab | Hand the terminal to `$SHELL`; the directory it is left in is where the next session starts |
+| Shift+Tab | Open `$SHELL` in a pane; where it ends up is where the next session starts |
 | Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
 | Ctrl+F | Local search over title, path, and related number |
 | Ctrl+O | Show stopped sessions and saved history, folded away by default |
@@ -150,15 +150,21 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 
 **Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
 
-**Where a session starts is chosen by walking there.** Shift+Tab hands the terminal to the user's `$SHELL` — the same handoff an attach uses: raw mode released, the input reader paused, the shell spawned on the real terminal, and everything taken back when it exits. agnt renders none of its output. Tab completion, abbreviations, aliases, colours, the prompt, history and every key binding are therefore the user's own, in full, because there is no reimplementation of any of them. The task text survives the trip; `exit` or Ctrl+D comes back.
+**Where a session starts is chosen with the shell — the real one.** Shift+Tab replaces the prompt with a pane running `$SHELL` on a pseudo-terminal. It is the user's interactive shell, started as a login shell, so tab completion, abbreviations, aliases, autosuggestions, colours, key bindings, the prompt and the history are all the shell's own. Every key in that mode goes to the shell; the only one agnt keeps is Shift+Tab, which comes back to the task, still holding its half-typed text.
 
-This is the second design of this feature, and the first one is worth recording because it explains why this one is so much smaller. It read each line in a text area and ran it through `$SHELL -c`, printing the output in a pane. Everything a line editor does then had to be rebuilt: path completion, a `$PWD` marker trailer to follow `cd`, an exit status saved before the trailer so `cd nope` did not read as success, an `abbr --show` reader and a word-position expander to make abbreviations work, a startup probe so an unfamiliar shell did not get a broken script. All of it existed to approximate a shell, and none of it reached fidelity: the pane could not host an editor or a pager. Dropping the requirement to display output removed the reason for all of it at once — with nothing to render, the terminal can simply be given away.
+**Which directory the shell is in is read from the operating system, not asked of the shell.** Asking means writing a line of the shell's own syntax into the user's prompt, where they would see it, and spelling it differently for every shell — `$PWD` against nushell against PowerShell. The kernel already knows: `/proc/<pid>/cwd` on Linux, `lsof -a -d cwd -p <pid>` on macOS. That works for any shell and costs nothing at the prompt.
 
-**Only the directory has to come back.** A process's working directory dies with the process, so the shell is asked to write it to a file named by `AGNT_PWD_FILE` on its way out, using its own family's exit hook: `--on-event fish_exit` for fish, and for bash and zsh a `trap ... EXIT` in a start-up file that sources the user's first (`--rcfile` for bash; a `ZDOTDIR` copy that sources `$AGNT_REAL_ZDOTDIR` for zsh). Sourcing the real config first is not optional — dropping someone into a shell without their prompt and aliases would be worse than not tracking the directory at all. A shell whose hook agnt does not know still starts, with `-i` and nothing else; it just leaves the directory where it was, which is a missing feature rather than a broken shell. `AGNT_SHELL` overrides `$SHELL`. The directory coming back is verified against real fish, bash and zsh binaries in the test suite.
+It has to be polled rather than read once, because a shell that exits takes its directory with it: there is no process left to ask, so the last directory must already have been observed. It is read at most every 150 ms while the shell is alive — reading it costs a process on macOS, so once per keystroke would be felt. The consequence is that it is approximate at the edges: `cd elsewhere && exit` on one line never exists long enough to be seen, and the next session starts where the shell was before it.
 
-Shell history is the user's own again, and deliberately so: this reverses the earlier decision to suppress it. That decision was right for a captured-output pane, which would have filled a history file with `cd` lines nobody would ever scroll back to. In a real interactive shell, history is the feature — up-arrow and Ctrl+R are how people navigate — and taking it away would make the shell worse than the one they started agnt from.
+This is the third design for this, and the first two were reimplementations of a terminal. A `cd`-only picker could not reach a directory with no sessions in it. Handing whole lines to `$SHELL -c` ran commands, but everything an interactive shell gives you had to be rebuilt on top: abbreviation expansion (they are a line-editor feature, so `-c` never expands them, and a generated config usually defines them only behind an `is-interactive` guard), a `$PWD` trailer to read the directory back, an exit-status save so `cd nope` did not report the trailer's success, a probe to find out whether the shell understood any of it, suppressed history, and path completion. Each piece worked; together they were a worse terminal than the one already installed. A terminal is a thing you can simply have.
 
-The footer carries only what is useful in the current state — a few keys when the prompt is empty, the start keys when it is not — and the full list is behind `?`. These keys apply only while the list owns the terminal. While an official CLI screen is open, that CLI's keys apply.
+**So ADR-0001's deferral of the PTY is deliberately overridden, for the prompt only.** What that ADR rules out is agnt owning the PTY that a *provider's CLI* runs on — that needs screen retention while hidden, continuous reading so the buffer cannot stall the child, resize, and work that outlives agnt. None of it applies here: this shell is visible whenever it exists, it is the user's own process, and it dies with agnt because nothing is meant to survive it. Attaching to a session still hands over the whole terminal (`terminal::handoff`) rather than running inside a pane.
+
+`portable-pty` opens the pty, `vt100` turns the bytes into a screen, and `tui-term` draws that screen as a ratatui widget. A reader thread does the blocking read and signals the event loop to redraw; the send is non-blocking, because a full channel must never stall the thread draining the pty. The pane is half the screen, clamped to 6–30 rows, and the shell is told that size before its first prompt so it never has to redraw. `exit` closes the pane and returns to the task. `AGNT_SHELL` overrides `$SHELL`.
+
+Two things follow from the shell being real that were not true before. Anything that wants a terminal — an editor, a pager, `git commit` — now works. And the user's history is the user's again: agnt used to suppress it, which was the polite choice for a prompt they could not scroll; a shell they can scroll should keep what they typed.
+
+The footer carries only what is useful in the current state — a few keys when the prompt is empty, the start keys when it is not, and in shell mode only the key that leaves, since the rest are the shell's — and the full list is behind `?`. These keys apply only while the list owns the terminal. While an official CLI screen is open, that CLI's keys apply.
 
 ## 4. Architecture
 
@@ -297,7 +303,7 @@ The first version's guarantee target is: "while agnt's list is open, work in ano
 
 ### If the design changes to PTY
 
-The execution part of an adapter is replaced by a PTY owner. Output keeps being read even while hidden, and a bounded scrollback and the terminal screen state are held. Leaving output unread can fill the PTY buffer and stall the child process. A raw output log alone does not guarantee that the screen can be reconstructed.
+This is about a provider's CLI, not the shell in the prompt, which already runs on a pty (section 3). The execution part of an adapter is replaced by a PTY owner. Output keeps being read even while hidden, and a bounded scrollback and the terminal screen state are held. Leaving output unread can fill the PTY buffer and stall the child process. A raw output log alone does not guarantee that the screen can be reconstructed.
 
 What becomes necessary: terminal emulation, resizing, CJK and combining characters, input, mouse and paste handling, and responses to queries from the terminal. Ratatui does not take this role. Returning to the list with a plain SIGSTOP or shell job control does not satisfy the requirement that work continues.
 

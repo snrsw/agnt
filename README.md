@@ -51,12 +51,13 @@ enter to start · tab for agent · esc to clear
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
-- **`S-Tab` drops you into your shell.** Not a shell mode inside agnt — your actual `$SHELL`, given the terminal, the same way attaching to a session is. So tab completion, abbreviations, aliases, colours, your prompt, your history and every key binding you have are the real ones, because it *is* the real shell. Nothing it prints appears inside agnt. Type `exit` (or `Ctrl+D`) to come back; the task you were half-way through typing is still there, and **the directory you left the shell in is where the next session starts**.
+- **`S-Tab` opens your shell in a pane** — the real one, running on a pseudo-terminal. It is `$SHELL` started as a login shell, so **tab completion, abbreviations, aliases, autosuggestions, colours, your key bindings, your prompt and your history all work**, because your shell is doing them, not agnt's imitation of them. Anything that wants a terminal — an editor, a pager, `git commit` — works too. Every key in that mode belongs to the shell; `S-Tab` is the one agnt keeps, and it comes back to the task, still there half-typed. Wherever the shell ends up is where the next session starts — read from the operating system rather than asked of the shell, so it works whatever your shell is. (It is polled while the shell runs, since a shell that has exited can no longer be asked; a `cd` on the same line as `exit` is too brief to be seen.) `exit` closes the pane.
+
+This replaced an earlier version that handed single lines to `$SHELL -c` and rebuilt the missing pieces — expanding abbreviations itself, appending a `$PWD` trailer to follow `cd`, probing the shell to find out whether it had understood. Each piece worked; together they were a worse terminal than the one already installed.
+
+Set `AGNT_SHELL` to run something other than `$SHELL`.
+
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
-
-This costs one thing: a process's working directory dies with it, so the shell is asked to write it down on the way out, through the exit hook its own family provides — `fish_exit` for fish, a `trap ... EXIT` sourced after your own config for bash and zsh. Your configuration is sourced first and never replaced. A shell with no hook agnt knows still starts and works normally; it just leaves the directory where it was.
-
-Set `AGNT_SHELL` to use something other than `$SHELL`.
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
@@ -113,7 +114,7 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 | `Enter` | Start it. On an empty prompt, attach to the selected row instead |
 | `↑` `↓` | Move, wrapping at both ends |
 | `Tab` | The new session's agent |
-| `S-Tab` | Drop into your shell; where you leave it is where the next session starts |
+| `S-Tab` | Open `$SHELL` in a pane; where it ends up is where the next session starts |
 | `Ctrl+T` | Cycle view: status, repository, workflow |
 | `Ctrl+F` | Search |
 | `Ctrl+O` | Show stopped sessions and saved history |

@@ -93,6 +93,8 @@ If official integration does not meet the requirements, the alternatives below a
 
 To keep work running after the managing TUI exits under the PTY approach, the PTY's owner has to be a separate process. "Single binary" and "no resident process" are not the same thing.
 
+**Amended: the prompt's shell does run on a pty.** What is deferred above is agnt owning the pty a *provider's CLI* runs on, and the costs listed are the costs of that: retaining a screen the user cannot see, reading continuously so a full buffer cannot stall the child, and keeping work alive past agnt's own exit. The shell behind Shift+Tab has none of those properties — it is visible whenever it exists, it is the user's own shell, and it is meant to die with agnt. Reimplementing an interactive shell's line editor on top of `$SHELL -c` was tried first and was the worse trade. Attaching to a session still hands the whole terminal over rather than running the CLI in a pane, so this decision stands for everything it was written about.
+
 ### D5. Separate execution state from work classification
 
 Execution state is observed from the tool; work classification is set by the user. The end of a response is not converted into the completion of work. A state that cannot be observed is Unknown, shown with the time it was last observed.

@@ -19,7 +19,7 @@ use crate::model::{
 use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
-use crate::shell::{self, Shell};
+use crate::shell::{self, PtyShell};
 use crate::storage::{CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
 use crate::ui;
@@ -50,6 +50,9 @@ pub enum AppEvent {
         then_hide: bool,
         result: Result<StopResult, AdapterError>,
     },
+    /// The embedded shell wrote to its screen. Carries nothing: the screen
+    /// itself lives behind the shell's own lock, and this only says "redraw".
+    ShellDrew,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +107,20 @@ impl NewSession {
     }
 }
 
+/// What the bottom of the screen is. Task mode is agnt's own prompt, which
+/// starts sessions. Shell mode is the user's shell, running on a
+/// pseudo-terminal and drawn in a pane.
+///
+/// In shell mode every key goes to the shell, which is the point: tab
+/// completion, abbreviations and line editing are the shell's, not agnt's
+/// imitation of them. The one key agnt keeps is Shift+Tab, to come back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    #[default]
+    Task,
+    Shell,
+}
+
 /// Side effects requested by a key press; executed by the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -118,9 +135,8 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
-    /// Hand the terminal to the user's shell, then take back whatever
-    /// directory they left it in.
-    OpenShell,
+    /// Start the embedded shell, sized to the pane it will be drawn in.
+    StartShell,
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
     RunPlan(Box<AttachPlan>),
@@ -190,11 +206,17 @@ pub struct App {
     preview_requested: BTreeSet<SessionKey>,
     /// The new-session prompt, always live. Typing goes here in task mode.
     pub draft: NewSession,
-    /// Where a new session starts. Begins where agnt was started, and moves
-    /// to wherever the user leaves the shell.
+    /// Whether the text area is taking a task or a `cd`.
+    pub input_mode: InputMode,
+    /// Where a new session starts. Follows the embedded shell.
     pub shell_cwd: PathBuf,
-    /// The shell to hand the terminal to.
-    pub shell: Shell,
+    /// When the shell's directory was last read, so a per-frame poll does
+    /// not spawn `lsof` on every keystroke.
+    last_cwd_poll: Option<std::time::Instant>,
+    /// The embedded shell, once shell mode has been opened.
+    pub pty: Option<PtyShell>,
+    /// Why the shell could not be started, if it could not.
+    pub notice: Option<String>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -235,8 +257,11 @@ impl App {
             should_quit: false,
             preview_requested: BTreeSet::new(),
             draft: NewSession::new(Provider::Claude),
+            input_mode: InputMode::default(),
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            shell: Shell::detect(),
+            pty: None,
+            last_cwd_poll: None,
+            notice: None,
             store,
             cache,
         };
@@ -633,6 +658,91 @@ impl App {
         self.shell_cwd.clone()
     }
 
+    // ----- shell mode ----------------------------------------------------
+
+    /// Every key in shell mode belongs to the shell, except the one that
+    /// leaves. Returning `None` means the key was not handled here, which
+    /// only happens when there is no shell running yet.
+    fn handle_shell_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
+        let pty = self.pty.as_mut()?;
+        if let Some(bytes) = shell::encode_key(key) {
+            pty.send(&bytes);
+        }
+        Some(Vec::new())
+    }
+
+    /// Follow the shell into whatever directory it is sitting in, so a new
+    /// session starts where the user navigated to. Read from the operating
+    /// system, so it costs nothing at the prompt and works for any shell.
+    pub fn sync_shell_cwd(&mut self) {
+        if let Some(cwd) = self.pty.as_ref().and_then(PtyShell::cwd)
+            && cwd.is_dir()
+        {
+            self.shell_cwd = cwd;
+        }
+    }
+
+    /// Start the shell, or record why it could not start.
+    pub fn open_shell(&mut self, rows: u16, cols: u16, on_output: impl Fn() + Send + 'static) {
+        if self.pty.is_some() {
+            return;
+        }
+        match PtyShell::spawn(&self.shell_cwd, rows.max(1), cols.max(1), on_output) {
+            Ok(pty) => {
+                self.pty = Some(pty);
+                self.notice = None;
+            }
+            Err(e) => {
+                self.notice = Some(format!("could not start {}: {e}", shell::program().display()));
+                self.input_mode = InputMode::Task;
+            }
+        }
+    }
+
+    /// How often the shell's directory is read while it is alive. Reading it
+    /// costs a process on macOS, so it is not done on every keystroke.
+    const CWD_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+
+    /// Follow the shell while it is running, not only when it is left.
+    ///
+    /// A shell that exits takes its directory with it — the kernel has
+    /// nothing left to answer about a process that is gone — so the last
+    /// directory has to have been observed before `exit`. Polling is
+    /// therefore the only option, and it is not exact: `cd elsewhere && exit`
+    /// on one line never exists long enough to be seen, and starts the next
+    /// session where the shell was before it.
+    pub fn poll_shell_cwd(&mut self) {
+        if self.pty.is_none() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.last_cwd_poll.is_some_and(|t| now - t < Self::CWD_POLL) {
+            return;
+        }
+        self.last_cwd_poll = Some(now);
+        self.sync_shell_cwd();
+    }
+
+    /// Tell the shell how big its pane is, so a resized window reflows the
+    /// shell's own output rather than leaving it wrapped for the old width.
+    pub fn fit_shell(&mut self, rows: u16, cols: u16) {
+        if let Some(pty) = self.pty.as_mut() {
+            pty.resize(rows, cols);
+        }
+    }
+
+    /// Drop the shell when it has exited, so `exit` closes the pane rather
+    /// than leaving a dead screen behind.
+    pub fn reap_shell(&mut self) {
+        if self.pty.as_mut().is_some_and(PtyShell::has_exited) {
+            // No sync here: the process is already gone, so there is nothing
+            // left to ask. `poll_shell_cwd` is what kept up with it.
+            self.pty = None;
+            self.last_cwd_poll = None;
+            self.input_mode = InputMode::Task;
+        }
+    }
+
     /// The selected session's key, when its short content has not been
     /// fetched yet. Returns it once per key so drawing never queues repeats.
     pub fn take_preview_request(&mut self) -> Option<SessionKey> {
@@ -793,10 +903,31 @@ impl App {
     fn handle_normal(&mut self, key: KeyEvent) -> Vec<Effect> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Shift+Tab hands the terminal to the user's shell. Everything the
-        // shell can do, it does — this is not a mode agnt has to implement.
+        // Shift+Tab swaps agnt's prompt for the user's shell and back. The
+        // task text stays where it was, so a trip through the shell to find
+        // the right directory never costs a half-typed task.
         if key.code == KeyCode::BackTab {
-            return vec![Effect::OpenShell];
+            self.input_mode = match self.input_mode {
+                InputMode::Task => InputMode::Shell,
+                InputMode::Shell => InputMode::Task,
+            };
+            if self.input_mode == InputMode::Shell {
+                // Starting a shell is expensive, so it waits until shell mode
+                // is actually opened; after that the same one is kept, which
+                // is what makes its history and its directory persist.
+                if self.pty.is_none() {
+                    return vec![Effect::StartShell];
+                }
+            } else {
+                // Leaving: take the directory the user navigated to with them.
+                self.sync_shell_cwd();
+            }
+            return Vec::new();
+        }
+        if self.input_mode == InputMode::Shell
+            && let Some(effects) = self.handle_shell_key(key)
+        {
+            return effects;
         }
 
         match key.code {
@@ -975,6 +1106,8 @@ impl App {
                 then_hide,
                 result,
             } => self.apply_stopped(key, then_hide, result),
+            // The shell drew; the next frame picks the screen up.
+            AppEvent::ShellDrew => {}
         }
     }
 }
@@ -1063,6 +1196,14 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
 
     let mut effects: Vec<Effect> = Vec::new();
     loop {
+        // Both of these are properties of the frame about to be drawn: the
+        // shell's pane is sized by the window, and a shell the user typed
+        // `exit` into must not be drawn as if it were still there.
+        app.poll_shell_cwd();
+        app.reap_shell();
+        let (rows, cols) = ui::shell_pane_size(guard.terminal().size()?.into());
+        app.fit_shell(rows, cols);
+
         guard.terminal().draw(|f| ui::draw(f, &app))?;
 
         if let Some(key) = app.take_preview_request()
@@ -1160,36 +1301,15 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                     };
                     spawn_refresh(&mut app, &adapters, ev_tx.clone());
                 }
-                Effect::OpenShell => {
-                    match app.shell.launch() {
-                        Ok(launch) => {
-                            let plan = AttachPlan {
-                                program: app.shell.program.clone(),
-                                args: launch.args.clone(),
-                                cwd: Some(app.shell_cwd.clone()),
-                                note: String::new(),
-                            };
-                            let status =
-                                terminal::handoff_with_env(&mut guard, &gate, &plan, &launch.env).await;
-                            // Follow the shell to wherever it was left. A
-                            // shell with no hook agnt knows writes nothing,
-                            // and the directory simply stays put.
-                            if let Some(dir) = shell::read_back_cwd(&launch.pwd_file) {
-                                app.shell_cwd = dir;
-                            }
-                            app.mode = match status {
-                                Ok(_) => Mode::Normal,
-                                Err(e) => Mode::Message(format!(
-                                    "could not start {}: {e}",
-                                    app.shell.program.display()
-                                )),
-                            };
-                            spawn_refresh(&mut app, &adapters, ev_tx.clone());
-                        }
-                        Err(e) => {
-                            app.mode = Mode::Message(format!("could not prepare a shell: {e}"));
-                        }
-                    }
+                Effect::StartShell => {
+                    let tx = ev_tx.clone();
+                    let (rows, cols) = ui::shell_pane_size(guard.terminal().size()?.into());
+                    app.open_shell(rows, cols, move || {
+                        // A blocking send would deadlock the reader thread
+                        // against a full channel; a dropped redraw is
+                        // harmless, because the next one carries the screen.
+                        let _ = tx.try_send(AppEvent::ShellDrew);
+                    });
                 }
                 Effect::Start {
                     provider,
@@ -1861,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_agent_and_shift_tab_opens_a_shell() {
+    fn tab_switches_agent_and_shift_tab_opens_the_shell() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
@@ -1871,13 +1991,138 @@ mod tests {
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.draft.provider, Provider::Claude);
 
-        // A half-typed task is still there after a trip to the shell: the
-        // shell borrows the terminal, it does not take over the prompt.
         for c in "fix the".chars() {
             app.handle_key(key(c));
         }
-        assert_eq!(app.handle_key(code(KeyCode::BackTab)), vec![Effect::OpenShell]);
+        // Opening shell mode asks for a shell, because there is none yet.
+        assert_eq!(app.handle_key(code(KeyCode::BackTab)), vec![Effect::StartShell]);
+        assert_eq!(app.input_mode, InputMode::Shell);
+
+        // Coming back leaves the half-typed task where it was.
+        app.handle_key(code(KeyCode::BackTab));
+        assert_eq!(app.input_mode, InputMode::Task);
         assert_eq!(app.draft.buffer, "fix the");
+    }
+
+    /// A shell that failed to start says so and does not leave the user in a
+    /// mode with nothing in it.
+    #[test]
+    fn a_shell_that_will_not_start_says_so_and_hands_the_mode_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.input_mode = InputMode::Shell;
+        // SAFETY: single-threaded test, before any thread reads the value.
+        unsafe { std::env::set_var("AGNT_SHELL", "/nonexistent/definitely-not-a-shell") };
+        app.open_shell(24, 80, || {});
+        unsafe { std::env::remove_var("AGNT_SHELL") };
+
+        assert!(app.pty.is_none());
+        assert_eq!(app.input_mode, InputMode::Task);
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(notice.contains("definitely-not-a-shell"), "{notice}");
+    }
+
+    /// The real thing, through the app: the shell runs, every key reaches it
+    /// rather than the list, and where it ends up is where a session starts.
+    #[tokio::test]
+    async fn keys_reach_the_embedded_shell_and_the_directory_follows_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
+        app.shell_cwd = dir.path().to_path_buf();
+
+        assert_eq!(app.handle_key(code(KeyCode::BackTab)), vec![Effect::StartShell]);
+        app.open_shell(24, 80, || {});
+        if app.pty.is_none() {
+            eprintln!("no pty available here; skipping");
+            return;
+        }
+
+        for _ in 0..100 {
+            if app.pty.as_ref().and_then(PtyShell::cwd).is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // Ctrl+T is a list action in task mode; in shell mode it is the
+        // shell's, so the view must not move.
+        let view = app.view;
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.view, view);
+
+        for c in "cd sub".chars() {
+            app.handle_key(key(c));
+        }
+        app.handle_key(code(KeyCode::Enter));
+
+        let mut moved = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            app.sync_shell_cwd();
+            if app.shell_cwd.canonicalize().ok() == sub.canonicalize().ok() {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "the shell did not move; screen was:\n{}",
+            app.pty.unwrap().parser().lock().unwrap().screen().contents()
+        );
+        assert_eq!(
+            app.new_session_cwd().canonicalize().unwrap(),
+            sub.canonicalize().unwrap()
+        );
+    }
+
+    /// `exit` closes the pane instead of leaving a dead screen behind, and
+    /// hands the directory the shell reached back to the task prompt.
+    #[tokio::test]
+    async fn exiting_the_shell_closes_the_pane() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = dir.path().to_path_buf();
+        app.input_mode = InputMode::Shell;
+        app.open_shell(24, 80, || {});
+        if app.pty.is_none() {
+            eprintln!("no pty available here; skipping");
+            return;
+        }
+
+        // Resizing a live shell is accepted; the pane follows the window.
+        app.fit_shell(10, 40);
+
+        app.pty.as_mut().unwrap().send(b"cd sub\r");
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            app.sync_shell_cwd();
+            if app.shell_cwd.canonicalize().ok() == sub.canonicalize().ok() {
+                break;
+            }
+        }
+
+        app.pty.as_mut().unwrap().send(b"exit\r");
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            app.poll_shell_cwd();
+            app.reap_shell();
+            if app.pty.is_none() {
+                break;
+            }
+        }
+        assert!(app.pty.is_none(), "the shell was never reaped");
+        assert_eq!(app.input_mode, InputMode::Task);
+        // The directory it reached before exiting is where the next
+        // session starts — read while it was alive, since a dead process
+        // cannot be asked.
+        assert_eq!(
+            app.new_session_cwd().canonicalize().unwrap(),
+            sub.canonicalize().unwrap()
+        );
     }
 
     /// Every printable key belongs to the prompt, so an action key that is
