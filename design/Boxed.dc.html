@@ -1,0 +1,74 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    body { margin: 0; background: #e8e6e0;
+      font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: #6f6c64; } a:hover { color: #46443e; }
+    .sheet { width: 1000px; height: 720px; box-sizing: border-box;
+      display: flex; flex-direction: column; gap: 0; background: #e8e6e0; }
+    .cap { padding: 18px 24px 12px; display: flex; flex-direction: column; gap: 5px; }
+    .cap h2 { margin: 0; font-size: 15px; font-weight: 700; color: #6f6c64; }
+    .cap p { margin: 0; font-size: 12px; line-height: 1.5; color: #8b8880; }
+    .cap b { color: #6f6c64; font-weight: 700; }
+    .term { flex-grow: 1; margin: 0 24px 24px; background: #f6f5f1;
+      border: 1px dashed #c9c5ba; display: flex; flex-direction: column; gap: 0;
+      padding: 10px 14px; font-size: 13px; line-height: 20px; color: #5a5852;
+      overflow: hidden; white-space: pre; }
+    .panel { border: 1px solid #b9b5aa; border-radius: 6px; padding: 4px 10px; margin-bottom: 8px;
+      display: flex; flex-direction: column; gap: 0; }
+    .panel.focus { border-color: #7c8fbf; }
+    .lbl { font-size: 11px; color: #8b8880; margin-top: -13px; background: #f6f5f1;
+      align-self: flex-start; padding: 0 4px; }
+    .dim { color: #a8a59c; }
+    .b { font-weight: 700; }
+    .trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</helmet>
+<div class="sheet">
+  <div class="cap">
+    <h2>Road not taken — Boxed panels</h2>
+    <p><b>Not built.</b> Each region in a rounded panel with its name in the border, the focused panel's border in the accent. The look of lazygit and zellij. Very app-like, and the most chrome of the three: the borders cost four rows and two columns before a single session is drawn.</p>
+    <p><b>Why not:</b> the design doc leans minimal, and the tinted direction gets most of the same clarity for none of the rows.</p>
+  </div>
+
+  <div class="term">
+    <div class="panel">
+      <div class="lbl">agnt · status · ~/src/reed</div>
+      <div class="dim trunc">1 needs you · 1 working · 4 idle · 50 in history</div>
+    </div>
+
+    <div class="panel" style="flex-grow: 1">
+      <div class="lbl">Sessions</div>
+      <div class="b">Needs you <span class="dim" style="font-weight: 400">1</span></div>
+      <div class="trunc">● claude-code-action auth subscription             issue #880</div>
+      <div class="dim trunc">  Claude · Needs input · reed · 34d</div>
+      <div> </div>
+      <div class="b">Working <span class="dim" style="font-weight: 400">1</span></div>
+      <div class="trunc">* rust project scaffolding                         PR #1</div>
+      <div class="dim trunc">  Claude · Working · agnt / scaffold · 4d</div>
+      <div> </div>
+      <div class="b">Idle <span class="dim" style="font-weight: 400">4</span></div>
+      <div class="trunc">○ review pr #985</div>
+      <div class="dim trunc">  Claude · Idle · reed · 1h</div>
+      <div class="trunc">○ reed pr 971 review comments                      2 PRs</div>
+      <div class="dim trunc">  Claude · Idle · reed / dr5-dedup · 1d</div>
+    </div>
+
+    <div class="panel focus">
+      <div class="lbl">New session</div>
+      <div class="dim trunc">&gt; Describe a task for a new session</div>
+      <div class="dim trunc">  Claude · ~/src/reed</div>
+    </div>
+    <div class="dim trunc">type to start a session · enter to attach · ? for shortcuts</div>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

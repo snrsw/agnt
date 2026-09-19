@@ -1,7 +1,9 @@
 {
   "artboards": [
-    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1000, "h": 720, "title": "Status view" },
-    { "file": "Repository.dc.html", "x": 1100, "y": 0, "w": 1000, "h": 720, "title": "Repository view" }
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1000, "h": 720, "title": "Status view · tinted" },
+    { "file": "Repository.dc.html", "x": 1100, "y": 0, "w": 1000, "h": 720, "title": "Repository view · tinted" },
+    { "file": "Boxed.dc.html", "x": 0, "y": 860, "w": 1000, "h": 720, "title": "Road not taken · Boxed" },
+    { "file": "Badges.dc.html", "x": 1100, "y": 860, "w": 1000, "h": 720, "title": "Road not taken · Badges" }
   ],
   "annotations": [
     {
@@ -9,14 +11,14 @@
       "x": 0,
       "y": -230,
       "w": 700,
-      "text": "agnt session list — the two views\n\nTab switches between them. Both are built and running against the real CLIs.\n\nStatus answers \"what needs me now\". Repository answers \"what was I doing in reed\"."
+      "text": "agnt session list — the modern look\n\nTop row is what ships: the two views, tinted. Colour comes from the terminal's own palette (named ANSI colours), so it wears yours rather than bringing its own.\n\nBottom row is the two directions considered and not taken, kept so the choice is visible."
     },
     {
-      "id": "deltas",
+      "id": "palette",
       "x": 780,
       "y": -230,
       "w": 620,
-      "text": "Where the build departed from these drawings:\n\n· repositories sort by what is in them, not by name\n· history folds away by default; z brings it back\n· no quoted last message until a transcript source exists"
+      "text": "The palette, and what each colour means:\n\n· amber — a session that needs you (glyph and heading)\n· green — one that is working\n· magenta — PR and issue references\n· blue — the brand mark, the cursor bar, the caret\n\nColour is additive: every state also has its glyph and its word."
     }
   ],
   "launch": { "view": "canvas" }
