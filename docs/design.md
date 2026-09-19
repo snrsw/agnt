@@ -108,6 +108,8 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
 
+**Spacing.** Every heading but the first has a blank line above it, and every heading with rows under it has one below, so a heading reads as a heading rather than as the first row of its group. The header, the prompt and the footer share a two-cell left margin — the width of the list's cursor gutter — so their text lines up with the rows' glyphs and nothing sits flush against the terminal's edge.
+
 **Rows never change height. Only the cursor moves.** Every card is two lines and every compact row is one, whichever is selected. The selected session's remaining details — its shortened path, its classification when one is set, its short id, and a preview once a provider can supply one — sit on a single footer line that is always present, blank when nothing is selected:
 
 ```

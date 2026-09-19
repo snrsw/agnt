@@ -63,6 +63,19 @@ mod theme {
     }
 }
 
+/// Left margin for the header, the prompt and the footer. Two cells, which
+/// is the width of the list's cursor gutter, so their text lines up with the
+/// rows' glyphs instead of sitting flush against the terminal's edge.
+const MARGIN: u16 = 2;
+
+fn with_margin(area: Rect) -> Rect {
+    Rect {
+        x: area.x + MARGIN.min(area.width),
+        width: area.width.saturating_sub(MARGIN),
+        ..area
+    }
+}
+
 /// How many lines the typed task needs, so the input grows with it.
 fn wrapped_lines(text: &str, width: usize) -> usize {
     if text.is_empty() || width == 0 {
@@ -74,7 +87,7 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    let input_w = (area.width as usize).saturating_sub(4).max(1);
+    let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
     // The input grows with the task instead of truncating it, up to a third
     // of the screen. A pasted path should be readable, not clipped.
     let grow_cap = ((area.height / 3).max(1) as usize).min(6);
@@ -109,6 +122,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// Three lines and a gap, the shape the agent view uses: what this is, where
 /// it is pointed, and what is in it.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
+    let area = with_margin(area);
     let width = area.width as usize;
 
     let counts: Vec<String> = app
@@ -152,7 +166,7 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme::rule());
-    let area = block.inner(outer);
+    let area = with_margin(block.inner(outer));
     let width = area.width as usize;
 
     let [input_area, target_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
@@ -485,14 +499,18 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, row)| match row {
             // A blank line above each heading but the first, so groups read
-            // as separate sections rather than as one run of rows.
+            // as separate sections, and one below it, so the heading stands
+            // off from its rows. A folded heading has no rows and takes none.
             ListRow::Group(h) => {
                 let line = group_line(h, app.view, total);
-                let lines = if i == 0 {
-                    vec![line]
-                } else {
-                    vec![Line::raw(""), line]
-                };
+                let mut lines = Vec::with_capacity(3);
+                if i != 0 {
+                    lines.push(Line::raw(""));
+                }
+                lines.push(line);
+                if !h.collapsed {
+                    lines.push(Line::raw(""));
+                }
                 ListItem::new(gutter(lines, false))
             }
             ListRow::Session(v) => {
@@ -531,6 +549,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
 /// something is wrong. A working provider does not need to announce itself,
 /// and the full key list is behind `?` rather than across the screen.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+    let area = with_margin(area);
     let width = area.width as usize;
     let mut lines = Vec::new();
 
@@ -781,11 +800,25 @@ mod tests {
         let first = heading("Needs you");
         let second = heading("Idle 1");
 
-        // A heading is followed straight away by its own rows.
-        assert!(!lines[first + 1].trim().is_empty(), "{out}");
+        // A heading stands off from its rows by one blank line.
+        assert!(lines[first + 1].trim().is_empty(), "{out}");
+        assert!(!lines[first + 2].trim().is_empty(), "{out}");
         // The next section is preceded by a blank line.
         assert!(lines[second - 1].trim().is_empty(), "{out}");
-        assert!(second > first + 1, "{out}");
+        assert!(second > first + 2, "{out}");
+    }
+
+    /// The header, the prompt and the footer share a left margin equal to the
+    /// list's gutter, so nothing sits flush against the terminal's edge.
+    #[test]
+    fn the_chrome_shares_the_gutter_margin() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
+        let out = render(&app, 120, 24);
+        for needle in ["agnt", "Describe a task", "? for shortcuts"] {
+            let line = out.lines().find(|l| l.contains(needle)).unwrap();
+            assert!(line.starts_with("  "), "{needle:?} is flush left:\n{out}");
+        }
     }
 
     /// The prompt is fenced off by a rule, so it does not read as another
