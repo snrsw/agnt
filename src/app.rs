@@ -107,9 +107,10 @@ impl NewSession {
     }
 }
 
-/// What the bottom of the screen is. Task mode is agnt's own prompt, which
-/// starts sessions. Shell mode is the user's shell, running on a
-/// pseudo-terminal and drawn in a pane.
+/// What the one text area at the bottom is. Task mode makes it agnt's own
+/// prompt, which starts sessions. Shell mode makes it the user's shell,
+/// running on a pseudo-terminal — the same box, in the same place, with a
+/// different thing in it.
 ///
 /// In shell mode every key goes to the shell, which is the point: tab
 /// completion, abbreviations and line editing are the shell's, not agnt's
@@ -135,7 +136,7 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
-    /// Start the embedded shell, sized to the pane it will be drawn in.
+    /// Start the embedded shell, sized to the text area it goes in.
     StartShell,
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
@@ -723,16 +724,17 @@ impl App {
         self.sync_shell_cwd();
     }
 
-    /// Tell the shell how big its pane is, so a resized window reflows the
-    /// shell's own output rather than leaving it wrapped for the old width.
+    /// Tell the shell how big the text area is, so a resized window reflows
+    /// the shell's own output rather than leaving it wrapped for the old
+    /// width.
     pub fn fit_shell(&mut self, rows: u16, cols: u16) {
         if let Some(pty) = self.pty.as_mut() {
             pty.resize(rows, cols);
         }
     }
 
-    /// Drop the shell when it has exited, so `exit` closes the pane rather
-    /// than leaving a dead screen behind.
+    /// Drop the shell when it has exited, so `exit` gives the text area back
+    /// to the task prompt rather than leaving a dead screen in it.
     pub fn reap_shell(&mut self) {
         if self.pty.as_mut().is_some_and(PtyShell::has_exited) {
             // No sync here: the process is already gone, so there is nothing
@@ -1197,11 +1199,11 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
     let mut effects: Vec<Effect> = Vec::new();
     loop {
         // Both of these are properties of the frame about to be drawn: the
-        // shell's pane is sized by the window, and a shell the user typed
-        // `exit` into must not be drawn as if it were still there.
+        // text area is sized by the window, and a shell the user typed `exit`
+        // into must not be drawn as if it were still there.
         app.poll_shell_cwd();
         app.reap_shell();
-        let (rows, cols) = ui::shell_pane_size(guard.terminal().size()?.into());
+        let (rows, cols) = ui::shell_area_size(guard.terminal().size()?.into());
         app.fit_shell(rows, cols);
 
         guard.terminal().draw(|f| ui::draw(f, &app))?;
@@ -1303,7 +1305,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 }
                 Effect::StartShell => {
                     let tx = ev_tx.clone();
-                    let (rows, cols) = ui::shell_pane_size(guard.terminal().size()?.into());
+                    let (rows, cols) = ui::shell_area_size(guard.terminal().size()?.into());
                     app.open_shell(rows, cols, move || {
                         // A blocking send would deadlock the reader thread
                         // against a full channel; a dropped redraw is
@@ -2077,10 +2079,10 @@ mod tests {
         );
     }
 
-    /// `exit` closes the pane instead of leaving a dead screen behind, and
-    /// hands the directory the shell reached back to the task prompt.
+    /// `exit` gives the text area back to the task prompt instead of leaving
+    /// a dead screen in it, and hands over the directory the shell reached.
     #[tokio::test]
-    async fn exiting_the_shell_closes_the_pane() {
+    async fn exiting_the_shell_gives_the_text_area_back() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
@@ -2093,7 +2095,7 @@ mod tests {
             return;
         }
 
-        // Resizing a live shell is accepted; the pane follows the window.
+        // Resizing a live shell is accepted; the box follows the window.
         app.fit_shell(10, 40);
 
         app.pty.as_mut().unwrap().send(b"cd sub\r");

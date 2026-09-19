@@ -84,20 +84,22 @@ fn wrapped_lines(text: &str, width: usize) -> usize {
     text.width().div_ceil(width).max(1)
 }
 
-/// How tall the shell pane is for a given screen: a rule, then the terminal.
-/// Half the screen, which is enough for a `git log` or a build without
-/// hiding the list that the shell is there to serve.
-fn shell_pane_rows(total_rows: u16) -> u16 {
-    (total_rows / 2).clamp(6, 30)
+/// How many rows of shell fit in the text area.
+///
+/// Enough for one command's output and the line being typed, not a terminal
+/// to live in: the list above it is what the screen is for. A command that
+/// prints more than this scrolls, and what stays is its tail, which is the
+/// part a prompt is usually consulted for.
+fn shell_rows(total_rows: u16) -> u16 {
+    (total_rows / 4).clamp(4, 10)
 }
 
 /// The size the embedded shell should be told it has, for a screen of this
 /// size. Needed before the first frame is drawn, so the shell starts at the
 /// right size rather than redrawing itself once.
-pub fn shell_pane_size(area: Rect) -> (u16, u16) {
-    let rows = shell_pane_rows(area.height).saturating_sub(1);
+pub fn shell_area_size(area: Rect) -> (u16, u16) {
     let cols = area.width.saturating_sub(MARGIN * 2);
-    (rows.max(1), cols.max(1))
+    (shell_rows(area.height).max(1), cols.max(1))
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -105,15 +107,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let shell_open = app.input_mode == InputMode::Shell && app.pty.is_some();
 
-    // In shell mode the shell replaces agnt's own prompt: it has a prompt of
-    // its own, and two prompts on one screen is one too many.
-    let (compose_h, shell_h) = if shell_open {
-        (0, shell_pane_rows(area.height))
+    // One box at the bottom either way, in the same place: agnt's prompt, or
+    // the shell's. Switching modes changes what is in the text area, not
+    // where it is or how the screen is divided.
+    let compose_h = if shell_open {
+        1 + shell_rows(area.height) + 1
     } else {
         let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
         let grow_cap = ((area.height / 3).max(1) as usize).min(6);
         let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
-        (1 + input_h + 1 + 1, 0)
+        1 + input_h + 1 + 1
     };
 
     // Detail line, then any problems, then the key hint. The detail line is
@@ -124,10 +127,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         + u16::from(app.has_provider_problem())
         + u16::from(app.notice.is_some());
 
-    let [header, body, shell, compose, status] = Layout::vertical([
+    let [header, body, compose, status] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(3),
-        Constraint::Length(shell_h),
         Constraint::Length(compose_h),
         Constraint::Length(status_h),
     ])
@@ -135,24 +137,27 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, header, app);
     draw_table(frame, body, app);
-    if shell_h > 0 {
-        draw_shell_pane(frame, shell, app);
-    }
-    if compose_h > 0 {
+    if shell_open {
+        draw_shell(frame, compose, app);
+    } else {
         draw_compose(frame, compose, app);
     }
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
 }
 
-/// The embedded shell's screen, drawn as the terminal it is.
+/// The shell, in the text area's own box.
 ///
 /// Nothing here interprets the content: `vt100` has already turned the
-/// shell's output into a grid of cells, colours and all, and `tui-term`
-/// draws that grid. The shell's own cursor is placed on the real terminal
-/// so it blinks where the user is typing.
-fn draw_shell_pane(frame: &mut Frame, outer: Rect, app: &App) {
-    let block = Block::default().borders(Borders::TOP).border_style(theme::rule());
+/// shell's output into a grid of cells, colours and all, and `tui-term` draws
+/// that grid. The bottom row of that grid is the shell's prompt, which is
+/// what makes this a text area — the user types into their own shell, with
+/// their own prompt, where agnt's prompt would otherwise be. The real cursor
+/// is placed on it so it blinks where they are typing.
+fn draw_shell(frame: &mut Frame, outer: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(theme::rule());
     let area = with_margin(block.inner(outer));
     frame.render_widget(block, outer);
 
@@ -167,7 +172,9 @@ fn draw_shell_pane(frame: &mut Frame, outer: Rect, app: &App) {
 
     if !screen.hide_cursor() {
         let (row, col) = screen.cursor_position();
-        frame.set_cursor_position((area.x + col, area.y + row));
+        if row < area.height && col < area.width {
+            frame.set_cursor_position((area.x + col, area.y + row));
+        }
     }
 }
 
@@ -684,7 +691,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "enter           start it, or attach to the selected row when the prompt is empty".into(),
                 "up / down       move".into(),
                 "tab             the new session's agent".into(),
-                "shift-tab       open your shell in a pane, and come back from it".into(),
+                "shift-tab       put your shell in the text area, and come back from it".into(),
                 "                it is a real terminal: completion, abbreviations and history".into(),
                 "                are your shell's. Where it ends up is where a session starts.".into(),
                 "".into(),
@@ -807,17 +814,17 @@ mod tests {
             .join("\n")
     }
 
-    /// The pane draws the shell's actual screen, and the prompt is gone
-    /// while it is open — the shell has one of its own.
+    /// The text area holds the shell's own screen: the command's output,
+    /// and on the bottom row the shell's prompt, where agnt's would be.
     #[tokio::test]
-    async fn the_shell_pane_draws_what_the_shell_printed() {
+    async fn the_text_area_holds_the_shell_and_what_it_printed() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![session("a", "fix a flaky test", RuntimeState::Idle)]);
         app.shell_cwd = dir.path().to_path_buf();
         app.input_mode = crate::app::InputMode::Shell;
         // Sized the way the loop sizes it, so the shell wraps its own output
-        // to the pane it is actually drawn in.
-        let (rows, cols) = shell_pane_size(Rect::new(0, 0, 100, 30));
+        // to the box it is actually drawn in.
+        let (rows, cols) = shell_area_size(Rect::new(0, 0, 100, 30));
         app.open_shell(rows, cols, || {});
         if app.pty.is_none() {
             eprintln!("no pty available here; skipping");
@@ -833,20 +840,43 @@ mod tests {
                 break;
             }
         }
-        app.pty.as_mut().unwrap().send(b"echo pane-canary\r");
+        app.pty.as_mut().unwrap().send(b"echo shell-canary\r");
         let mut drawn = String::new();
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             drawn = render(&app, 100, 30);
-            if drawn.contains("pane-canary") {
+            if drawn.contains("shell-canary") {
                 break;
             }
         }
-        assert!(drawn.contains("pane-canary"), "{drawn}");
+        assert!(drawn.contains("shell-canary"), "{drawn}");
         // The list is still there above it, and agnt's own prompt is not.
         assert!(has(&drawn, "fix a flaky test"), "{drawn}");
         assert!(!drawn.contains("Describe a task for a new session"), "{drawn}");
         assert!(drawn.contains("shift-tab back to the list"), "{drawn}");
+
+        // The shell sits in one box where the task prompt's box was, not in a
+        // pane of its own: two rules, the same as task mode.
+        let lines: Vec<&str> = drawn.lines().collect();
+        let rules: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("───"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(rules.len(), 2, "expected one box, got {rules:?}\n{drawn}");
+
+        // And the line being typed is the box's last row, with the output
+        // above it — the prompt does not drift downward as commands run.
+        let (top, bottom) = (rules[0], rules[1]);
+        assert!(
+            !lines[bottom - 1].trim().is_empty(),
+            "the prompt is not on the bottom row\n{drawn}"
+        );
+        assert!(
+            lines[top + 1].trim().is_empty(),
+            "the shell was not pushed to the bottom\n{drawn}"
+        );
     }
 
     /// Wide characters occupy two cells and column padding varies with the

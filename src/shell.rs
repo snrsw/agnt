@@ -1,9 +1,15 @@
 //! A real shell, embedded in the list.
 //!
-//! Shell mode runs `$SHELL` on a pseudo-terminal and draws its screen in a
-//! pane. That means it is the user's actual interactive shell: tab
-//! completion, abbreviations, autosuggestions, colours, prompt and history
-//! all work, because fish (or zsh, or bash) is doing them, not agnt.
+//! Shell mode runs `$SHELL` on a pseudo-terminal and draws its screen in
+//! the text area at the bottom of the list — the same box the task prompt
+//! uses, with the shell's own prompt on its bottom row. That means it is the
+//! user's actual interactive shell: tab completion, abbreviations,
+//! autosuggestions, colours, prompt and history all work, because fish (or
+//! zsh, or bash) is doing them, not agnt.
+//!
+//! The box is a few rows tall, which is what a prompt needs: one command's
+//! output and the line being typed. It is not a terminal to live in — the
+//! list above it is what the screen is for.
 //!
 //! An earlier version handed single lines to `$SHELL -c` and reimplemented
 //! the pieces an interactive shell would have provided — abbreviation
@@ -26,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
-/// How much of the shell's scrollback the pane keeps.
+/// How much of the shell's scrollback the emulator keeps.
 pub const SCROLLBACK: usize = 1000;
 
 /// Which shell to run: `AGNT_SHELL`, else `$SHELL`, else `/bin/sh`.
@@ -98,7 +104,15 @@ impl PtyShell {
         let pid = child.process_id();
         drop(pair.slave);
 
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
+        // Start the cursor on the last row, before the shell has written
+        // anything, so its first prompt is drawn at the bottom of the box and
+        // every later one is too. A terminal fills from the top and only
+        // reaches the bottom once it has scrolled; in a box this small that
+        // would mean the line being typed drifts downward for the first few
+        // commands. Pre-scrolling costs nothing and holds it still.
+        let mut vt = vt100::Parser::new(rows, cols, SCROLLBACK);
+        vt.process(&b"\r\n".repeat(rows.saturating_sub(1) as usize));
+        let parser = Arc::new(Mutex::new(vt));
         let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
         let mut reader = pair.master.try_clone_reader().map_err(std::io::Error::other)?;
 
@@ -138,7 +152,7 @@ impl PtyShell {
     }
 
     /// Whether the shell has exited. A shell the user typed `exit` into
-    /// should not leave a dead pane behind.
+    /// should not leave a dead screen in the text area.
     pub fn has_exited(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }

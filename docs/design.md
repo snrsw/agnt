@@ -135,7 +135,7 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 | Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
 | Up / Down | Move between rows, wrapping at both ends |
 | Tab | The new session's agent |
-| Shift+Tab | Open `$SHELL` in a pane; where it ends up is where the next session starts |
+| Shift+Tab | Put `$SHELL` in the text area; where it ends up is where the next session starts |
 | Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
 | Ctrl+F | Local search over title, path, and related number |
 | Ctrl+O | Show stopped sessions and saved history, folded away by default |
@@ -150,7 +150,11 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 
 **Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
 
-**Where a session starts is chosen with the shell — the real one.** Shift+Tab replaces the prompt with a pane running `$SHELL` on a pseudo-terminal. It is the user's interactive shell, started as a login shell, so tab completion, abbreviations, aliases, autosuggestions, colours, key bindings, the prompt and the history are all the shell's own. Every key in that mode goes to the shell; the only one agnt keeps is Shift+Tab, which comes back to the task, still holding its half-typed text.
+**Where a session starts is chosen with the shell — the real one.** Shift+Tab puts `$SHELL` in the text area. The same box in the same place, a few rows tall; what changes is what is in it. It runs on a pseudo-terminal as a login shell, so tab completion, abbreviations, aliases, autosuggestions, colours, key bindings, the prompt and the history are all the shell's own. Every key in that mode goes to the shell; the only one agnt keeps is Shift+Tab, which comes back to the task, still holding its half-typed text.
+
+**The box is sized for one command's output, not for a terminal to live in.** Four to ten rows, by screen height: the line being typed and the result of the command before it. More output than that scrolls, and what stays is the tail, which is the part a prompt is usually consulted for. The list above it is what the screen is for; anything that deserves a full screen deserves a session, which is what Enter on the task prompt is.
+
+The shell's own prompt is pinned to the box's bottom row. A terminal fills from the top and only reaches the bottom once it has scrolled, so in a box this small the line being typed would drift downward for the first few commands. Feeding the emulator a screen's worth of newlines before the shell writes anything starts it at the bottom and holds it there.
 
 **Which directory the shell is in is read from the operating system, not asked of the shell.** Asking means writing a line of the shell's own syntax into the user's prompt, where they would see it, and spelling it differently for every shell — `$PWD` against nushell against PowerShell. The kernel already knows: `/proc/<pid>/cwd` on Linux, `lsof -a -d cwd -p <pid>` on macOS. That works for any shell and costs nothing at the prompt.
 
@@ -160,7 +164,7 @@ This is the third design for this, and the first two were reimplementations of a
 
 **So ADR-0001's deferral of the PTY is deliberately overridden, for the prompt only.** What that ADR rules out is agnt owning the PTY that a *provider's CLI* runs on — that needs screen retention while hidden, continuous reading so the buffer cannot stall the child, resize, and work that outlives agnt. None of it applies here: this shell is visible whenever it exists, it is the user's own process, and it dies with agnt because nothing is meant to survive it. Attaching to a session still hands over the whole terminal (`terminal::handoff`) rather than running inside a pane.
 
-`portable-pty` opens the pty, `vt100` turns the bytes into a screen, and `tui-term` draws that screen as a ratatui widget. A reader thread does the blocking read and signals the event loop to redraw; the send is non-blocking, because a full channel must never stall the thread draining the pty. The pane is half the screen, clamped to 6–30 rows, and the shell is told that size before its first prompt so it never has to redraw. `exit` closes the pane and returns to the task. `AGNT_SHELL` overrides `$SHELL`.
+`portable-pty` opens the pty, `vt100` turns the bytes into a screen, and `tui-term` draws that screen as a ratatui widget. A reader thread does the blocking read and signals the event loop to redraw; the send is non-blocking, because a full channel must never stall the thread draining the pty. The shell is told the box's size before its first prompt, so it never has to redraw, and told again whenever the window changes. `exit` gives the box back to the task prompt. `AGNT_SHELL` overrides `$SHELL`.
 
 Two things follow from the shell being real that were not true before. Anything that wants a terminal — an editor, a pager, `git commit` — now works. And the user's history is the user's again: agnt used to suppress it, which was the polite choice for a prompt they could not scroll; a shell they can scroll should keep what they typed.
 

@@ -51,7 +51,9 @@ enter to start · tab for agent · esc to clear
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
-- **`S-Tab` opens your shell in a pane** — the real one, running on a pseudo-terminal. It is `$SHELL` started as a login shell, so **tab completion, abbreviations, aliases, autosuggestions, colours, your key bindings, your prompt and your history all work**, because your shell is doing them, not agnt's imitation of them. Anything that wants a terminal — an editor, a pager, `git commit` — works too. Every key in that mode belongs to the shell; `S-Tab` is the one agnt keeps, and it comes back to the task, still there half-typed. Wherever the shell ends up is where the next session starts — read from the operating system rather than asked of the shell, so it works whatever your shell is. (It is polled while the shell runs, since a shell that has exited can no longer be asked; a `cd` on the same line as `exit` is too brief to be seen.) `exit` closes the pane.
+- **`S-Tab` puts your shell in the text area** — the real one, running on a pseudo-terminal. Same box, same place; what changes is what is in it. It is `$SHELL` started as a login shell, so **tab completion, abbreviations, aliases, autosuggestions, colours, your key bindings, your prompt and your history all work**, because your shell is doing them, not agnt's imitation of them. Anything that wants a terminal — an editor, a pager, `git commit` — works too. Every key in that mode belongs to the shell; `S-Tab` is the one agnt keeps, and it comes back to the task, still there half-typed. Wherever the shell ends up is where the next session starts — read from the operating system rather than asked of the shell, so it works whatever your shell is. (It is polled while the shell runs, since a shell that has exited can no longer be asked; a `cd` on the same line as `exit` is too brief to be seen.) `exit` gives the box back to the task prompt.
+
+  The box is a few rows tall — the line you are typing and the result of the command before it. It is a prompt, not a terminal to live in; more output than that scrolls, and the tail is what stays.
 
 This replaced an earlier version that handed single lines to `$SHELL -c` and rebuilt the missing pieces — expanding abbreviations itself, appending a `$PWD` trailer to follow `cd`, probing the shell to find out whether it had understood. Each piece worked; together they were a worse terminal than the one already installed.
 
@@ -114,7 +116,7 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 | `Enter` | Start it. On an empty prompt, attach to the selected row instead |
 | `↑` `↓` | Move, wrapping at both ends |
 | `Tab` | The new session's agent |
-| `S-Tab` | Open `$SHELL` in a pane; where it ends up is where the next session starts |
+| `S-Tab` | Put `$SHELL` in the text area; where it ends up is where the next session starts |
 | `Ctrl+T` | Cycle view: status, repository, workflow |
 | `Ctrl+F` | Search |
 | `Ctrl+O` | Show stopped sessions and saved history |
