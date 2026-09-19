@@ -51,14 +51,12 @@ enter to start · tab for agent · esc to clear
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 
 - **`Tab` switches the agent**, Claude to Codex and back. The agent is shown under the prompt, so what Enter will start is always visible.
-- **`S-Tab` switches the text area to a shell.** Each line runs in your `$SHELL` from the current directory, output appears in a pane above the prompt, and the directory the shell ends in is where the next session starts — so `cd` works the way it does anywhere, `cd foo && ls` included. `Tab` completes paths. `S-Tab` again comes back to the task, still there half-typed. **Your abbreviations and aliases work**, and agnt is the one expanding them: they are features of the shell's line editor, so nothing expands them for a command handed to `-c`, and in a generated config they are usually only *defined* for an interactive shell in the first place. agnt asks your shell for its `abbr --show` (or `alias`) once, and expands command-position words itself — the pane echoes what actually ran, so an abbreviation is never invisible. **Nothing goes into your shell history** (`fish_private_mode`, or `HISTFILE=/dev/null`).
-
-**On an unfamiliar shell it degrades rather than breaking.** Reading the directory back needs one line of the shell's own syntax, and that is the one thing that cannot be written once for everybody — nushell and PowerShell spell it nothing like bash does. So agnt probes your shell at startup with a command whose answer it knows. If the answer is wrong, commands still run; only `cd` stops sticking, and the pane says so. bash, zsh, fish and sh are all verified by the test suite.
-
-Set `AGNT_SHELL` to use something other than `$SHELL` — that is the escape hatch if your login shell is one of the ones that cannot report back.
-
-Commands run without a terminal of their own: stdin is closed and output is captured, so an editor or a pager won't work there, and anything still running after a minute is killed.
+- **`S-Tab` drops you into your shell.** Not a shell mode inside agnt — your actual `$SHELL`, given the terminal, the same way attaching to a session is. So tab completion, abbreviations, aliases, colours, your prompt, your history and every key binding you have are the real ones, because it *is* the real shell. Nothing it prints appears inside agnt. Type `exit` (or `Ctrl+D`) to come back; the task you were half-way through typing is still there, and **the directory you left the shell in is where the next session starts**.
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
+
+This costs one thing: a process's working directory dies with it, so the shell is asked to write it down on the way out, through the exit hook its own family provides — `fish_exit` for fish, a `trap ... EXIT` sourced after your own config for bash and zsh. Your configuration is sourced first and never replaced. A shell with no hook agnt knows still starts and works normally; it just leaves the directory where it was.
+
+Set `AGNT_SHELL` to use something other than `$SHELL`.
 
 The two agents start differently, and the difference is visible rather than smoothed over. Claude starts a background session and the row appears immediately. Codex has no background start, so agnt hands it the terminal; when you leave it, the conversation joins the list on the next refresh.
 
@@ -115,7 +113,7 @@ A row is history when it has stopped, or when it exists only as a saved file. A 
 | `Enter` | Start it. On an empty prompt, attach to the selected row instead |
 | `↑` `↓` | Move, wrapping at both ends |
 | `Tab` | The new session's agent |
-| `S-Tab` | Switch the text area to a shell; where it `cd`s is where the next session starts |
+| `S-Tab` | Drop into your shell; where you leave it is where the next session starts |
 | `Ctrl+T` | Cycle view: status, repository, workflow |
 | `Ctrl+F` | Search |
 | `Ctrl+O` | Show stopped sessions and saved history |

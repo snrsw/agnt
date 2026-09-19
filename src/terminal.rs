@@ -152,11 +152,25 @@ pub async fn handoff(
     gate: &InputGate,
     plan: &AttachPlan,
 ) -> io::Result<ExitStatus> {
+    handoff_with_env(guard, gate, plan, &[]).await
+}
+
+/// Hand over the terminal with extra environment for the child. Used to tell
+/// a shell where to write the directory it ends up in.
+pub async fn handoff_with_env(
+    guard: &mut TerminalGuard,
+    gate: &InputGate,
+    plan: &AttachPlan,
+    env: &[(String, String)],
+) -> io::Result<ExitStatus> {
     gate.pause();
     guard.release()?;
 
     let mut cmd = tokio::process::Command::new(&plan.program);
     cmd.args(&plan.args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     if let Some(dir) = &plan.cwd {
         cmd.current_dir(dir);
     }

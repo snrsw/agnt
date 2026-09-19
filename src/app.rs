@@ -19,7 +19,7 @@ use crate::model::{
 use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
-use crate::shell::{self, Shell, ShellInfo, Tracking};
+use crate::shell::{self, Shell};
 use crate::storage::{CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
 use crate::ui;
@@ -50,15 +50,6 @@ pub enum AppEvent {
         then_hide: bool,
         result: Result<StopResult, AdapterError>,
     },
-    /// A shell-mode command finished. `stdout` still carries the `$PWD`
-    /// trailer the runner appended; `apply_shell_done` strips it.
-    ShellDone {
-        stdout: String,
-        stderr: String,
-        ok: bool,
-    },
-    /// The shell answered: what it can do, and what abbreviations it has.
-    ShellReady(ShellInfo),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,46 +104,6 @@ impl NewSession {
     }
 }
 
-/// What the text area is for. Task mode starts sessions. Shell mode is a
-/// one-line shell: each Enter runs the line in `$SHELL -c` from the current
-/// directory, the output lands in a pane above the prompt, and the directory
-/// the shell ends in becomes where the next session starts — so `cd` works
-/// the way it does anywhere, inside `&&` chains included.
-///
-/// Abbreviations and aliases are expanded by agnt before the line is run,
-/// because they are features of the shell's line editor and nothing expands
-/// them for a command handed to `-c`. History is off: this prompt is for
-/// getting somewhere, not a session to scroll back through.
-///
-/// Commands run without a terminal: stdin is closed and output is captured.
-/// Anything that needs a TTY — an editor, a pager — will not work here, and
-/// that is the line this stops at. A PTY with a screen behind it is the thing
-/// ADR-0001 keeps out of the first version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum InputMode {
-    #[default]
-    Task,
-    Shell,
-}
-
-fn longest_common_prefix(names: &[String]) -> String {
-    let Some(first) = names.first() else {
-        return String::new();
-    };
-    let mut end = first.len();
-    for n in &names[1..] {
-        end = first
-            .char_indices()
-            .zip(n.chars())
-            .take_while(|((_, a), b)| a == b)
-            .map(|((i, a), _)| i + a.len_utf8())
-            .last()
-            .unwrap_or(0)
-            .min(end);
-    }
-    first[..end].to_string()
-}
-
 /// Side effects requested by a key press; executed by the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -167,11 +118,9 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
-    /// Run a shell-mode line in the user's shell, from the current directory.
-    RunShell(String),
-    /// Ask the shell what it can do and what abbreviations it has. Sent
-    /// once, on first use.
-    InterrogateShell,
+    /// Hand the terminal to the user's shell, then take back whatever
+    /// directory they left it in.
+    OpenShell,
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
     RunPlan(Box<AttachPlan>),
@@ -241,25 +190,11 @@ pub struct App {
     preview_requested: BTreeSet<SessionKey>,
     /// The new-session prompt, always live. Typing goes here in task mode.
     pub draft: NewSession,
-    /// Whether the text area is taking a task or a `cd`.
-    pub input_mode: InputMode,
-    /// The shell-mode line being typed.
-    pub shell_line: String,
-    /// Where a new session starts. Begins where agnt was started and moves
-    /// with `cd` in shell mode.
+    /// Where a new session starts. Begins where agnt was started, and moves
+    /// to wherever the user leaves the shell.
     pub shell_cwd: PathBuf,
-    /// What shell-mode commands have printed, newest last. Shown in a pane
-    /// above the prompt while in shell mode.
-    pub shell_output: Vec<String>,
-    /// A command is running; Enter waits for it.
-    pub shell_busy: bool,
-    /// Completion candidates, shown on the footer's detail line.
-    pub notice: Option<String>,
-    /// The shell commands run in, and what it calls its abbreviations.
+    /// The shell to hand the terminal to.
     pub shell: Shell,
-    /// What the shell said about itself, once asked. `None` until the answer
-    /// arrives, which is also how "not asked yet" is spelled.
-    pub shell_info: Option<ShellInfo>,
     store: MetadataStore,
     cache: CacheStore,
 }
@@ -300,14 +235,8 @@ impl App {
             should_quit: false,
             preview_requested: BTreeSet::new(),
             draft: NewSession::new(Provider::Claude),
-            input_mode: InputMode::default(),
-            shell_line: String::new(),
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            shell_output: Vec::new(),
-            shell_busy: false,
             shell: Shell::detect(),
-            shell_info: None,
-            notice: None,
             store,
             cache,
         };
@@ -704,154 +633,6 @@ impl App {
         self.shell_cwd.clone()
     }
 
-    // ----- shell mode ----------------------------------------------------
-
-    /// Keys that belong to the shell line. Returns `None` for a key that is
-    /// not the shell line's business — the cursor keys, the Ctrl actions — so
-    /// those keep working in either mode.
-    fn handle_shell_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        match key.code {
-            KeyCode::Enter => return Some(self.run_shell_line()),
-            KeyCode::Tab => self.complete_shell_path(),
-            KeyCode::Backspace => {
-                self.shell_line.pop();
-            }
-            KeyCode::Char('u') if ctrl => self.shell_line.clear(),
-            KeyCode::Char('w') if ctrl => {
-                let trimmed = self.shell_line.trim_end();
-                let cut = trimmed.rfind(' ').map(|i| i + 1).unwrap_or(0);
-                self.shell_line.truncate(cut);
-            }
-            KeyCode::Esc => self.shell_line.clear(),
-            KeyCode::Char(c) if !ctrl => self.shell_line.push(c),
-            _ => return None,
-        }
-        Some(Vec::new())
-    }
-
-    /// Hand the line to the event loop to run. The echo goes into the pane
-    /// now, so the pane reads like a terminal even before the output lands.
-    fn run_shell_line(&mut self) -> Vec<Effect> {
-        let line = std::mem::take(&mut self.shell_line);
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            return Vec::new();
-        }
-        if self.shell_busy {
-            self.shell_line = line;
-            self.notice = Some("still running the last command".into());
-            return Vec::new();
-        }
-        // Expand the way the shell's line editor would have, and echo what
-        // will actually run rather than what was typed — an abbreviation the
-        // user cannot see the expansion of is a trap.
-        let line = match &self.shell_info {
-            Some(info) => shell::expand(&line, &info.abbrs),
-            None => line,
-        };
-        self.notice = None;
-        self.shell_busy = true;
-        self.push_shell_output(format!("$ {line}"));
-        vec![Effect::RunShell(line)]
-    }
-
-    fn push_shell_output(&mut self, line: String) {
-        self.shell_output.push(line);
-        if self.shell_output.len() > shell::SCROLLBACK {
-            let drop = self.shell_output.len() - shell::SCROLLBACK;
-            self.shell_output.drain(..drop);
-        }
-    }
-
-    /// Take a finished command's output into the pane, and follow the shell
-    /// into whatever directory it ended in.
-    pub fn apply_shell_done(&mut self, stdout: String, stderr: String, ok: bool) {
-        self.shell_busy = false;
-        let (out, pwd) = shell::split_pwd_marker(&stdout);
-        for line in out.lines().chain(stderr.lines()) {
-            self.push_shell_output(crate::model::text::sanitize(line));
-        }
-        if !ok && stderr.trim().is_empty() && out.trim().is_empty() {
-            self.push_shell_output("(exit status was not zero)".into());
-        }
-        // Follow the shell only when it actually moved. The shell reports
-        // `$PWD` in its canonical spelling — `/private/tmp` for `/tmp` on
-        // macOS — so a same-directory answer would otherwise swap the path
-        // the user typed for one they did not.
-        if let Some(pwd) = pwd
-            && pwd.is_dir()
-            && pwd.canonicalize().ok() != self.shell_cwd.canonicalize().ok()
-        {
-            self.shell_cwd = pwd;
-        }
-    }
-
-    /// Complete the last word of the line against the files and directories
-    /// that match. One match fills in, closing a directory with `/`; several
-    /// fill in as far as they agree and are listed on the footer. Only an
-    /// argument is completed — the first word is a command, and completing
-    /// command names would mean walking `$PATH`.
-    fn complete_shell_path(&mut self) {
-        let line = self.shell_line.clone();
-        let Some(space) = line.rfind(char::is_whitespace) else {
-            return;
-        };
-        let (head, arg) = (line[..=space].to_string(), line[space + 1..].to_string());
-
-        // The typed text is split at its last `/`: everything before names
-        // the directory to search, everything after is the prefix to match.
-        let (typed_dir, prefix) = match arg.rfind('/') {
-            Some(i) => (arg[..=i].to_string(), arg[i + 1..].to_string()),
-            None => (String::new(), arg.clone()),
-        };
-        let search_in = if typed_dir.is_empty() {
-            self.shell_cwd.clone()
-        } else {
-            let p = expand_home(&typed_dir);
-            if p.is_absolute() {
-                p
-            } else {
-                self.shell_cwd.join(p)
-            }
-        };
-
-        let mut matches: Vec<(String, bool)> = match std::fs::read_dir(&search_in) {
-            Ok(entries) => entries
-                .flatten()
-                .map(|e| {
-                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    (e.file_name().to_string_lossy().into_owned(), is_dir)
-                })
-                .filter(|(n, _)| n.starts_with(&prefix))
-                .filter(|(n, _)| prefix.starts_with('.') || !n.starts_with('.'))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        matches.sort();
-
-        match matches.as_slice() {
-            [] => self.notice = Some(format!("nothing here starts with {prefix:?}")),
-            [(one, is_dir)] => {
-                let close = if *is_dir { "/" } else { " " };
-                self.shell_line = format!("{head}{typed_dir}{one}{close}");
-                self.notice = None;
-            }
-            many => {
-                let names: Vec<String> = many.iter().map(|(n, _)| n.clone()).collect();
-                let common = longest_common_prefix(&names);
-                if common.len() > prefix.len() {
-                    self.shell_line = format!("{head}{typed_dir}{common}");
-                }
-                let shown: Vec<String> = many
-                    .iter()
-                    .map(|(n, d)| if *d { format!("{n}/") } else { n.clone() })
-                    .collect();
-                self.notice = Some(shown.join("  "));
-            }
-        }
-    }
-
     /// The selected session's key, when its short content has not been
     /// fetched yet. Returns it once per key so drawing never queues repeats.
     pub fn take_preview_request(&mut self) -> Option<SessionKey> {
@@ -1012,25 +793,10 @@ impl App {
     fn handle_normal(&mut self, key: KeyEvent) -> Vec<Effect> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        // Shift+Tab switches the text area between a task and a `cd`. Each
-        // keeps its own line, so switching never loses a half-typed task.
+        // Shift+Tab hands the terminal to the user's shell. Everything the
+        // shell can do, it does — this is not a mode agnt has to implement.
         if key.code == KeyCode::BackTab {
-            self.input_mode = match self.input_mode {
-                InputMode::Task => InputMode::Shell,
-                InputMode::Shell => InputMode::Task,
-            };
-            self.notice = None;
-            // Asking the shell starts a shell, so it waits until the first
-            // time shell mode is actually opened.
-            if self.input_mode == InputMode::Shell && self.shell_info.is_none() {
-                return vec![Effect::InterrogateShell];
-            }
-            return Vec::new();
-        }
-        if self.input_mode == InputMode::Shell
-            && let Some(effects) = self.handle_shell_key(key)
-        {
-            return effects;
+            return vec![Effect::OpenShell];
         }
 
         match key.code {
@@ -1209,18 +975,6 @@ impl App {
                 then_hide,
                 result,
             } => self.apply_stopped(key, then_hide, result),
-            AppEvent::ShellDone { stdout, stderr, ok } => self.apply_shell_done(stdout, stderr, ok),
-            AppEvent::ShellReady(info) => {
-                // Say it once, plainly: an unfamiliar shell runs commands but
-                // cannot report where it ended up, so `cd` will not stick.
-                if info.tracking == Tracking::Unavailable {
-                    self.push_shell_output(format!(
-                        "({} cannot report its directory back, so cd will not persist here. Set AGNT_SHELL to bash, zsh or fish for that.)",
-                        self.shell.program.display()
-                    ));
-                }
-                self.shell_info = Some(info);
-            }
         }
     }
 }
@@ -1406,24 +1160,36 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                     };
                     spawn_refresh(&mut app, &adapters, ev_tx.clone());
                 }
-                Effect::RunShell(line) => {
-                    let tx = ev_tx.clone();
-                    let shell = app.shell.clone();
-                    let cwd = app.shell_cwd.clone();
-                    let tracking = app.shell_info.as_ref().map(|i| i.tracking).unwrap_or_default();
-                    tokio::spawn(async move {
-                        let (stdout, stderr, ok) = shell.run(&cwd, &line, tracking).await;
-                        let _ = tx.send(AppEvent::ShellDone { stdout, stderr, ok }).await;
-                    });
-                }
-                Effect::InterrogateShell => {
-                    let tx = ev_tx.clone();
-                    let shell = app.shell.clone();
-                    let cwd = app.shell_cwd.clone();
-                    tokio::spawn(async move {
-                        let info = shell.interrogate(&cwd).await;
-                        let _ = tx.send(AppEvent::ShellReady(info)).await;
-                    });
+                Effect::OpenShell => {
+                    match app.shell.launch() {
+                        Ok(launch) => {
+                            let plan = AttachPlan {
+                                program: app.shell.program.clone(),
+                                args: launch.args.clone(),
+                                cwd: Some(app.shell_cwd.clone()),
+                                note: String::new(),
+                            };
+                            let status =
+                                terminal::handoff_with_env(&mut guard, &gate, &plan, &launch.env).await;
+                            // Follow the shell to wherever it was left. A
+                            // shell with no hook agnt knows writes nothing,
+                            // and the directory simply stays put.
+                            if let Some(dir) = shell::read_back_cwd(&launch.pwd_file) {
+                                app.shell_cwd = dir;
+                            }
+                            app.mode = match status {
+                                Ok(_) => Mode::Normal,
+                                Err(e) => Mode::Message(format!(
+                                    "could not start {}: {e}",
+                                    app.shell.program.display()
+                                )),
+                            };
+                            spawn_refresh(&mut app, &adapters, ev_tx.clone());
+                        }
+                        Err(e) => {
+                            app.mode = Mode::Message(format!("could not prepare a shell: {e}"));
+                        }
+                    }
                 }
                 Effect::Start {
                     provider,
@@ -1462,7 +1228,6 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
 mod tests {
     use super::*;
     use crate::model::{Operation, View, WorkflowState};
-    use crate::shell::Abbreviation;
 
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -2096,7 +1861,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_switches_agent_and_shift_tab_switches_to_shell_mode() {
+    fn tab_switches_agent_and_shift_tab_opens_a_shell() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
@@ -2106,215 +1871,13 @@ mod tests {
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.draft.provider, Provider::Claude);
 
-        // A half-typed task survives a trip through shell mode, and Enter in
-        // shell mode hands the line to the loop rather than starting anything.
+        // A half-typed task is still there after a trip to the shell: the
+        // shell borrows the terminal, it does not take over the prompt.
         for c in "fix the".chars() {
             app.handle_key(key(c));
         }
-        app.handle_key(code(KeyCode::BackTab));
-        assert_eq!(app.input_mode, InputMode::Shell);
-        for c in "cd other-repo && ls".chars() {
-            app.handle_key(key(c));
-        }
-        assert_eq!(app.shell_line, "cd other-repo && ls");
+        assert_eq!(app.handle_key(code(KeyCode::BackTab)), vec![Effect::OpenShell]);
         assert_eq!(app.draft.buffer, "fix the");
-        let effects = app.handle_key(code(KeyCode::Enter));
-        assert_eq!(effects, vec![Effect::RunShell("cd other-repo && ls".into())]);
-        assert!(app.shell_line.is_empty());
-        assert!(app.shell_busy);
-        assert_eq!(
-            app.shell_output.last().map(String::as_str),
-            Some("$ cd other-repo && ls")
-        );
-
-        app.handle_key(code(KeyCode::BackTab));
-        assert_eq!(app.input_mode, InputMode::Task);
-        assert_eq!(app.draft.buffer, "fix the");
-    }
-
-    /// The shell's own `cd` is what moves the directory: the runner appends a
-    /// `$PWD` trailer, and the result follows the shell to where it ended up.
-    #[tokio::test]
-    async fn the_shell_moves_the_directory_and_the_output_lands_in_the_pane() {
-        let dir = tempfile::tempdir().unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.shell_cwd = dir.path().to_path_buf();
-        app.input_mode = InputMode::Shell;
-
-        let sh = Shell::at("/bin/sh");
-        let (stdout, stderr, ok) = sh
-            .run(dir.path(), "cd sub && echo inside && pwd", Tracking::Works)
-            .await;
-        assert!(ok, "{stderr}");
-        app.apply_shell_done(stdout, stderr, ok);
-
-        assert_eq!(app.shell_cwd.canonicalize().unwrap(), sub.canonicalize().unwrap());
-        assert!(!app.shell_busy);
-        assert!(
-            app.shell_output.iter().any(|l| l == "inside"),
-            "{:?}",
-            app.shell_output
-        );
-        // The marker never reaches the pane.
-        assert!(
-            !app.shell_output.iter().any(|l| l.contains(shell::PWD_MARKER)),
-            "{:?}",
-            app.shell_output
-        );
-        assert_eq!(
-            app.new_session_cwd().canonicalize().unwrap(),
-            sub.canonicalize().unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failing_command_keeps_the_directory_and_shows_stderr() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.shell_cwd = dir.path().to_path_buf();
-
-        let sh = Shell::at("/bin/sh");
-        let (stdout, stderr, ok) = sh.run(dir.path(), "cd nope-not-here", Tracking::Works).await;
-        assert!(!ok);
-        app.apply_shell_done(stdout, stderr, ok);
-        // Unchanged, and in the spelling it was given, not the shell's.
-        assert_eq!(app.shell_cwd, dir.path());
-        assert!(
-            app.shell_output.iter().any(|l| l.contains("nope-not-here")),
-            "{:?}",
-            app.shell_output
-        );
-
-        // A command that exits the shell leaves no trailer: directory unchanged.
-        let (stdout, _, _) = sh.run(dir.path(), "exit 3", Tracking::Works).await;
-        assert_eq!(shell::split_pwd_marker(&stdout).1, None);
-    }
-
-    /// The line that runs is the expanded one, and the pane echoes it, so an
-    /// abbreviation is never invisible.
-    #[test]
-    fn abbreviations_are_expanded_before_the_line_runs() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.input_mode = InputMode::Shell;
-        app.shell_info = Some(ShellInfo {
-            abbrs: [(
-                "ls".to_string(),
-                Abbreviation {
-                    expansion: "eza --icons --git".into(),
-                    anywhere: false,
-                },
-            )]
-            .into_iter()
-            .collect(),
-            tracking: Tracking::Works,
-        });
-        for c in "ls -la".chars() {
-            app.handle_key(key(c));
-        }
-        let effects = app.handle_key(code(KeyCode::Enter));
-        assert_eq!(effects, vec![Effect::RunShell("eza --icons --git -la".into())]);
-        assert_eq!(
-            app.shell_output.last().map(String::as_str),
-            Some("$ eza --icons --git -la")
-        );
-    }
-
-    /// Opening shell mode asks the shell about itself, once.
-    #[test]
-    fn the_shell_is_asked_about_itself_on_first_use_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![]);
-        assert_eq!(
-            app.handle_key(code(KeyCode::BackTab)),
-            vec![Effect::InterrogateShell]
-        );
-        app.handle_key(code(KeyCode::BackTab));
-        // Still pending: asking again would start another shell.
-        assert_eq!(
-            app.handle_key(code(KeyCode::BackTab)),
-            vec![Effect::InterrogateShell]
-        );
-
-        app.handle_app_event(AppEvent::ShellReady(ShellInfo {
-            abbrs: BTreeMap::new(),
-            tracking: Tracking::Works,
-        }));
-        app.handle_key(code(KeyCode::BackTab));
-        assert!(app.handle_key(code(KeyCode::BackTab)).is_empty());
-    }
-
-    /// A shell that cannot report its directory says so once, in the pane,
-    /// rather than leaving the user to wonder why `cd` does nothing.
-    #[test]
-    fn an_unusable_shell_says_so_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.handle_app_event(AppEvent::ShellReady(ShellInfo::default()));
-        let said = app.shell_output.join("\n");
-        assert!(said.contains("cd will not persist"), "{said}");
-        assert!(said.contains("AGNT_SHELL"), "{said}");
-    }
-
-    #[test]
-    fn tab_completes_the_last_word_against_files_and_directories() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["alpha", "alpine", "beta", ".hidden"] {
-            std::fs::create_dir(dir.path().join(name)).unwrap();
-        }
-        std::fs::write(dir.path().join("notes.md"), "").unwrap();
-        let mut app = app_with(&dir, vec![]);
-        app.shell_cwd = dir.path().to_path_buf();
-        app.input_mode = InputMode::Shell;
-
-        for c in "cd b".chars() {
-            app.handle_key(key(c));
-        }
-        app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "cd beta/");
-
-        app.shell_line = "cat no".into();
-        app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "cat notes.md ");
-
-        app.shell_line = "ls al".into();
-        app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "ls alp");
-        let notice = app.notice.clone().unwrap_or_default();
-        assert!(
-            notice.contains("alpha/") && notice.contains("alpine/"),
-            "{notice}"
-        );
-
-        // Hidden entries only offer themselves to a dotted prefix, and a bare
-        // command name is not completed.
-        app.shell_line = "ls ".into();
-        app.handle_key(code(KeyCode::Tab));
-        assert!(!app.notice.clone().unwrap_or_default().contains(".hidden"));
-        app.shell_line = "ls .h".into();
-        app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "ls .hidden/");
-        app.shell_line = "gi".into();
-        app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "gi");
-    }
-
-    /// In shell mode the letters go to the shell line, and the Ctrl actions
-    /// still reach the list.
-    #[test]
-    fn shell_mode_types_into_the_shell_line_and_keeps_the_actions() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = app_with(&dir, vec![session(Provider::Claude, "a", RuntimeState::Idle)]);
-        app.input_mode = InputMode::Shell;
-        for c in "pwd".chars() {
-            app.handle_key(key(c));
-        }
-        assert_eq!(app.shell_line, "pwd");
-        assert!(app.draft.buffer.is_empty());
-        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
-        assert_eq!(app.view, View::Repository);
     }
 
     /// Every printable key belongs to the prompt, so an action key that is
