@@ -49,6 +49,13 @@ pub enum AppEvent {
         then_hide: bool,
         result: Result<StopResult, AdapterError>,
     },
+    /// A shell-mode command finished. `stdout` still carries the `$PWD`
+    /// trailer the runner appended; `apply_shell_done` strips it.
+    ShellDone {
+        stdout: String,
+        stderr: String,
+        ok: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,11 +110,16 @@ impl NewSession {
     }
 }
 
-/// What the text area is for. Task mode starts sessions. Shell mode moves the
-/// directory they start in, with `cd`, which is the directory picker every
-/// terminal user already knows — and the only thing shell mode knows: it is
-/// not a shell, and running anything else here would mean a PTY and output
-/// rendering, which the ADR keeps out of the first version.
+/// What the text area is for. Task mode starts sessions. Shell mode is a
+/// one-line shell: each Enter runs the line in `$SHELL -c` from the current
+/// directory, the output lands in a pane above the prompt, and the directory
+/// the shell ends in becomes where the next session starts — so `cd` works
+/// the way it does anywhere, inside `&&` chains included.
+///
+/// Commands run without a terminal: stdin is closed and output is captured.
+/// Anything that needs a TTY — an editor, a pager — will not work here, and
+/// that is the line this stops at. A PTY with a screen behind it is the thing
+/// ADR-0001 keeps out of the first version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InputMode {
     #[default]
@@ -115,23 +127,93 @@ pub enum InputMode {
     Shell,
 }
 
-/// Resolve `.` and `..` lexically, without touching the filesystem, so
-/// `cd ../api` reads back as the path the user meant rather than as whatever
-/// a symlink resolves to.
-pub fn normalize(path: &std::path::Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in path.components() {
-        match c {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
+/// Printed by the shell after each command so the directory it ended in can
+/// be read back. Deliberately dull text: it has to survive every shell's
+/// `printf` and never be mistaken for output.
+pub const PWD_MARKER: &str = "__agnt_pwd__:";
+
+/// The user's shell, or `/bin/sh` when none is set.
+pub fn shell_program() -> PathBuf {
+    std::env::var_os("SHELL")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
+
+/// The line as handed to `$SHELL -c`: the command, then a trailer that
+/// prints the directory the shell is now in and exits with the command's own
+/// status. The trailer runs in the same shell, after the command, so a `cd`
+/// in the command has already happened when `$PWD` is printed.
+///
+/// The status has to be saved before the `printf`, or the shell reports the
+/// `printf`'s success rather than the command's — `cd nope` would read as
+/// fine. Saving it is the one place shells differ: `$?` and `x=…` are POSIX,
+/// fish spells them `$status` and `set x …`.
+pub fn shell_script(shell: &std::path::Path, line: &str) -> String {
+    let is_fish = shell.file_name().is_some_and(|n| n == "fish");
+    let (save, exit) = if is_fish {
+        ("set __agnt_s $status", "exit $__agnt_s")
+    } else {
+        ("__agnt_s=$?", "exit $__agnt_s")
+    };
+    format!("{line}\n{save}\nprintf '\\n{PWD_MARKER}%s\\n' \"$PWD\"\n{exit}")
+}
+
+/// Split the marker trailer off captured stdout: the output as the user
+/// should see it, and the directory the shell ended in, if the trailer ran.
+/// A command that exits the shell or fails to parse leaves no trailer, and
+/// that reads as "directory unchanged".
+pub fn split_pwd_marker(stdout: &str) -> (String, Option<PathBuf>) {
+    let Some(at) = stdout.rfind(PWD_MARKER) else {
+        return (stdout.to_string(), None);
+    };
+    let pwd = stdout[at + PWD_MARKER.len()..]
+        .lines()
+        .next()
+        .map(|s| PathBuf::from(s.trim()));
+    // The trailer starts with its own newline; drop that too.
+    let head = stdout[..at].strip_suffix('\n').unwrap_or(&stdout[..at]);
+    (head.to_string(), pwd.filter(|p| !p.as_os_str().is_empty()))
+}
+
+/// How long a shell-mode command may run before it is killed. Long enough
+/// for a build, short enough that a command waiting on a terminal it does
+/// not have gives up rather than wedging the list.
+pub const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run one shell-mode line: captured stdout and stderr, and whether it
+/// succeeded. Stdin is closed so nothing can wait on input.
+pub async fn run_shell(shell: &std::path::Path, cwd: &std::path::Path, line: &str) -> (String, String, bool) {
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.arg("-c")
+        .arg(shell_script(shell, line))
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    match tokio::time::timeout(SHELL_TIMEOUT, cmd.output()).await {
+        Ok(Ok(out)) => (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.status.success(),
+        ),
+        Ok(Err(e)) => (
+            String::new(),
+            format!("could not run {}: {e}", shell.display()),
+            false,
+        ),
+        Err(_) => (
+            String::new(),
+            format!(
+                "killed after {}s: shell-mode commands run without a terminal",
+                SHELL_TIMEOUT.as_secs()
+            ),
+            false,
+        ),
+    }
+}
+
+/// Lines the output pane keeps. Older lines fall off the top.
+pub const SHELL_SCROLLBACK: usize = 500;
 
 fn longest_common_prefix(names: &[String]) -> String {
     let Some(first) = names.first() else {
@@ -151,21 +233,6 @@ fn longest_common_prefix(names: &[String]) -> String {
     first[..end].to_string()
 }
 
-/// `$HOME` as `~`, for messages that name a directory.
-pub fn collapse_home(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy();
-    match std::env::var_os("HOME") {
-        Some(home) => {
-            let home = home.to_string_lossy();
-            match text.strip_prefix(home.as_ref()) {
-                Some(rest) => format!("~{rest}"),
-                None => text.into_owned(),
-            }
-        }
-        None => text.into_owned(),
-    }
-}
-
 /// Side effects requested by a key press; executed by the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -180,6 +247,8 @@ pub enum Effect {
         provider: Provider,
         request: StartRequest,
     },
+    /// Run a shell-mode line in `$SHELL` from the current directory.
+    RunShell(String),
     /// Give the terminal to a command, then refresh. Used when a provider can
     /// only start interactively.
     RunPlan(Box<AttachPlan>),
@@ -256,10 +325,12 @@ pub struct App {
     /// Where a new session starts. Begins where agnt was started and moves
     /// with `cd` in shell mode.
     pub shell_cwd: PathBuf,
-    /// Where `cd -` goes back to.
-    shell_prev: Option<PathBuf>,
-    /// The answer to the last shell command or completion, shown on the
-    /// footer's detail line while in shell mode.
+    /// What shell-mode commands have printed, newest last. Shown in a pane
+    /// above the prompt while in shell mode.
+    pub shell_output: Vec<String>,
+    /// A command is running; Enter waits for it.
+    pub shell_busy: bool,
+    /// Completion candidates, shown on the footer's detail line.
     pub notice: Option<String>,
     store: MetadataStore,
     cache: CacheStore,
@@ -304,7 +375,8 @@ impl App {
             input_mode: InputMode::default(),
             shell_line: String::new(),
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            shell_prev: None,
+            shell_output: Vec::new(),
+            shell_busy: false,
             notice: None,
             store,
             cache,
@@ -710,7 +782,7 @@ impl App {
     fn handle_shell_key(&mut self, key: KeyEvent) -> Option<Vec<Effect>> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
-            KeyCode::Enter => self.run_shell_line(),
+            KeyCode::Enter => return Some(self.run_shell_line()),
             KeyCode::Tab => self.complete_shell_path(),
             KeyCode::Backspace => {
                 self.shell_line.pop();
@@ -728,76 +800,67 @@ impl App {
         Some(Vec::new())
     }
 
-    /// `cd [dir]` and `pwd`. Anything else is answered, not run.
-    fn run_shell_line(&mut self) {
+    /// Hand the line to the event loop to run. The echo goes into the pane
+    /// now, so the pane reads like a terminal even before the output lands.
+    fn run_shell_line(&mut self) -> Vec<Effect> {
         let line = std::mem::take(&mut self.shell_line);
-        let line = line.trim();
-        let (cmd, arg) = match line.split_once(char::is_whitespace) {
-            Some((c, a)) => (c, a.trim()),
-            None => (line, ""),
-        };
-        match cmd {
-            "" | "pwd" => self.notice = Some(collapse_home(&self.shell_cwd)),
-            "cd" => self.change_dir(arg),
-            other => {
-                self.notice = Some(format!(
-                    "`{other}` is not a command here. Shell mode knows cd and pwd: it picks a directory, it does not run things."
-                ));
-            }
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            return Vec::new();
+        }
+        if self.shell_busy {
+            self.shell_line = line;
+            self.notice = Some("still running the last command".into());
+            return Vec::new();
+        }
+        self.notice = None;
+        self.shell_busy = true;
+        self.push_shell_output(format!("$ {line}"));
+        vec![Effect::RunShell(line)]
+    }
+
+    fn push_shell_output(&mut self, line: String) {
+        self.shell_output.push(line);
+        if self.shell_output.len() > SHELL_SCROLLBACK {
+            let drop = self.shell_output.len() - SHELL_SCROLLBACK;
+            self.shell_output.drain(..drop);
         }
     }
 
-    fn change_dir(&mut self, arg: &str) {
-        let target = match arg {
-            "" | "~" => match std::env::var_os("HOME") {
-                Some(h) => PathBuf::from(h),
-                None => {
-                    self.notice = Some("no HOME to go to".into());
-                    return;
-                }
-            },
-            "-" => match &self.shell_prev {
-                Some(p) => p.clone(),
-                None => {
-                    self.notice = Some("no previous directory yet".into());
-                    return;
-                }
-            },
-            _ => {
-                let p = expand_home(arg);
-                if p.is_absolute() {
-                    p
-                } else {
-                    self.shell_cwd.join(p)
-                }
-            }
-        };
-        let target = normalize(&target);
-        if !target.is_dir() {
-            self.notice = Some(format!("no such directory: {}", collapse_home(&target)));
-            return;
+    /// Take a finished command's output into the pane, and follow the shell
+    /// into whatever directory it ended in.
+    pub fn apply_shell_done(&mut self, stdout: String, stderr: String, ok: bool) {
+        self.shell_busy = false;
+        let (out, pwd) = split_pwd_marker(&stdout);
+        for line in out.lines().chain(stderr.lines()) {
+            self.push_shell_output(crate::model::text::sanitize(line));
         }
-        self.shell_prev = Some(std::mem::replace(&mut self.shell_cwd, target));
-        self.notice = Some(collapse_home(&self.shell_cwd));
+        if !ok && stderr.trim().is_empty() && out.trim().is_empty() {
+            self.push_shell_output("(exit status was not zero)".into());
+        }
+        // Follow the shell only when it actually moved. The shell reports
+        // `$PWD` in its canonical spelling — `/private/tmp` for `/tmp` on
+        // macOS — so a same-directory answer would otherwise swap the path
+        // the user typed for one they did not.
+        if let Some(pwd) = pwd
+            && pwd.is_dir()
+            && pwd.canonicalize().ok() != self.shell_cwd.canonicalize().ok()
+        {
+            self.shell_cwd = pwd;
+        }
     }
 
-    /// Complete the argument of `cd` against the directories that match. One
-    /// match fills in and closes with `/`; several fill in as far as they
-    /// agree and are listed on the footer.
+    /// Complete the last word of the line against the files and directories
+    /// that match. One match fills in, closing a directory with `/`; several
+    /// fill in as far as they agree and are listed on the footer. Only an
+    /// argument is completed — the first word is a command, and completing
+    /// command names would mean walking `$PATH`.
     fn complete_shell_path(&mut self) {
         let line = self.shell_line.clone();
-        let (cmd, arg) = match line.split_once(char::is_whitespace) {
-            Some((c, a)) => (c, a.trim_start().to_string()),
-            None => {
-                if line.trim() == "cd" {
-                    self.shell_line = "cd ".into();
-                }
-                return;
-            }
-        };
-        if cmd != "cd" {
+        let Some(space) = line.rfind(char::is_whitespace) else {
             return;
-        }
+        };
+        let (head, arg) = (line[..=space].to_string(), line[space + 1..].to_string());
 
         // The typed text is split at its last `/`: everything before names
         // the directory to search, everything after is the prefix to match.
@@ -816,35 +879,38 @@ impl App {
             }
         };
 
-        let mut matches: Vec<String> = match std::fs::read_dir(&search_in) {
+        let mut matches: Vec<(String, bool)> = match std::fs::read_dir(&search_in) {
             Ok(entries) => entries
                 .flatten()
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| n.starts_with(&prefix))
-                .filter(|n| prefix.starts_with('.') || !n.starts_with('.'))
+                .map(|e| {
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    (e.file_name().to_string_lossy().into_owned(), is_dir)
+                })
+                .filter(|(n, _)| n.starts_with(&prefix))
+                .filter(|(n, _)| prefix.starts_with('.') || !n.starts_with('.'))
                 .collect(),
             Err(_) => Vec::new(),
         };
         matches.sort();
 
         match matches.as_slice() {
-            [] => {
-                self.notice = Some(format!(
-                    "nothing in {} starts with {prefix:?}",
-                    collapse_home(&search_in)
-                ))
-            }
-            [one] => {
-                self.shell_line = format!("{cmd} {typed_dir}{one}/");
+            [] => self.notice = Some(format!("nothing here starts with {prefix:?}")),
+            [(one, is_dir)] => {
+                let close = if *is_dir { "/" } else { " " };
+                self.shell_line = format!("{head}{typed_dir}{one}{close}");
                 self.notice = None;
             }
             many => {
-                let common = longest_common_prefix(many);
+                let names: Vec<String> = many.iter().map(|(n, _)| n.clone()).collect();
+                let common = longest_common_prefix(&names);
                 if common.len() > prefix.len() {
-                    self.shell_line = format!("{cmd} {typed_dir}{common}");
+                    self.shell_line = format!("{head}{typed_dir}{common}");
                 }
-                self.notice = Some(many.join("  "));
+                let shown: Vec<String> = many
+                    .iter()
+                    .map(|(n, d)| if *d { format!("{n}/") } else { n.clone() })
+                    .collect();
+                self.notice = Some(shown.join("  "));
             }
         }
     }
@@ -1201,6 +1267,7 @@ impl App {
                 then_hide,
                 result,
             } => self.apply_stopped(key, then_hide, result),
+            AppEvent::ShellDone { stdout, stderr, ok } => self.apply_shell_done(stdout, stderr, ok),
         }
     }
 }
@@ -1385,6 +1452,15 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                         Err(e) => Mode::Message(format!("could not run it: {e}")),
                     };
                     spawn_refresh(&mut app, &adapters, ev_tx.clone());
+                }
+                Effect::RunShell(line) => {
+                    let tx = ev_tx.clone();
+                    let shell = shell_program();
+                    let cwd = app.shell_cwd.clone();
+                    tokio::spawn(async move {
+                        let (stdout, stderr, ok) = run_shell(&shell, &cwd, &line).await;
+                        let _ = tx.send(AppEvent::ShellDone { stdout, stderr, ok }).await;
+                    });
                 }
                 Effect::Start {
                     provider,
@@ -2058,8 +2134,6 @@ mod tests {
     #[test]
     fn tab_switches_agent_and_shift_tab_switches_to_shell_mode() {
         let dir = tempfile::tempdir().unwrap();
-        let other = dir.path().join("other-repo");
-        std::fs::create_dir(&other).unwrap();
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
 
@@ -2068,72 +2142,135 @@ mod tests {
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.draft.provider, Provider::Claude);
 
-        // A half-typed task survives a trip through shell mode.
+        // A half-typed task survives a trip through shell mode, and Enter in
+        // shell mode hands the line to the loop rather than starting anything.
         for c in "fix the".chars() {
             app.handle_key(key(c));
         }
         app.handle_key(code(KeyCode::BackTab));
         assert_eq!(app.input_mode, InputMode::Shell);
-        for c in "cd other-repo".chars() {
+        for c in "cd other-repo && ls".chars() {
             app.handle_key(key(c));
         }
-        assert_eq!(app.shell_line, "cd other-repo");
+        assert_eq!(app.shell_line, "cd other-repo && ls");
         assert_eq!(app.draft.buffer, "fix the");
-        app.handle_key(code(KeyCode::Enter));
-        assert_eq!(app.shell_cwd, other);
+        let effects = app.handle_key(code(KeyCode::Enter));
+        assert_eq!(effects, vec![Effect::RunShell("cd other-repo && ls".into())]);
         assert!(app.shell_line.is_empty());
+        assert!(app.shell_busy);
+        assert_eq!(
+            app.shell_output.last().map(String::as_str),
+            Some("$ cd other-repo && ls")
+        );
 
         app.handle_key(code(KeyCode::BackTab));
         assert_eq!(app.input_mode, InputMode::Task);
         assert_eq!(app.draft.buffer, "fix the");
-        assert_eq!(app.new_session_cwd(), other);
     }
 
-    /// `cd` behaves the way a shell's does for the cases that matter: a
-    /// missing target changes nothing and says so, `..` climbs, `-` returns,
-    /// and a bare `cd` goes home.
-    #[test]
-    fn cd_climbs_returns_and_refuses_what_is_not_there() {
+    /// The shell's own `cd` is what moves the directory: the runner appends a
+    /// `$PWD` trailer, and the result follows the shell to where it ended up.
+    #[tokio::test]
+    async fn the_shell_moves_the_directory_and_the_output_lands_in_the_pane() {
         let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a");
-        let b = a.join("b");
-        std::fs::create_dir_all(&b).unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
         let mut app = app_with(&dir, vec![]);
-        app.shell_cwd = a.clone();
+        app.shell_cwd = dir.path().to_path_buf();
         app.input_mode = InputMode::Shell;
 
-        let run = |app: &mut App, line: &str| {
-            for c in line.chars() {
-                app.handle_key(key(c));
-            }
-            app.handle_key(code(KeyCode::Enter));
-        };
+        let sh = std::path::Path::new("/bin/sh");
+        let (stdout, stderr, ok) = run_shell(sh, dir.path(), "cd sub && echo inside && pwd").await;
+        assert!(ok, "{stderr}");
+        app.apply_shell_done(stdout, stderr, ok);
 
-        run(&mut app, "cd nope");
-        assert_eq!(app.shell_cwd, a);
-        assert!(app.notice.as_deref().unwrap_or("").contains("no such directory"));
+        assert_eq!(app.shell_cwd.canonicalize().unwrap(), sub.canonicalize().unwrap());
+        assert!(!app.shell_busy);
+        assert!(
+            app.shell_output.iter().any(|l| l == "inside"),
+            "{:?}",
+            app.shell_output
+        );
+        // The marker never reaches the pane.
+        assert!(
+            !app.shell_output.iter().any(|l| l.contains(PWD_MARKER)),
+            "{:?}",
+            app.shell_output
+        );
+        assert_eq!(
+            app.new_session_cwd().canonicalize().unwrap(),
+            sub.canonicalize().unwrap()
+        );
+    }
 
-        run(&mut app, "cd b");
-        assert_eq!(app.shell_cwd, b);
-        run(&mut app, "cd ..");
-        assert_eq!(app.shell_cwd, a);
-        run(&mut app, "cd -");
-        assert_eq!(app.shell_cwd, b);
+    #[tokio::test]
+    async fn a_failing_command_keeps_the_directory_and_shows_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = dir.path().to_path_buf();
 
-        run(&mut app, "ls");
-        assert_eq!(app.shell_cwd, b);
-        assert!(app.notice.as_deref().unwrap_or("").contains("not a command here"));
+        let sh = std::path::Path::new("/bin/sh");
+        let (stdout, stderr, ok) = run_shell(sh, dir.path(), "cd nope-not-here").await;
+        assert!(!ok);
+        app.apply_shell_done(stdout, stderr, ok);
+        // Unchanged, and in the spelling it was given, not the shell's.
+        assert_eq!(app.shell_cwd, dir.path());
+        assert!(
+            app.shell_output.iter().any(|l| l.contains("nope-not-here")),
+            "{:?}",
+            app.shell_output
+        );
 
-        run(&mut app, "cd");
-        assert_eq!(app.shell_cwd, PathBuf::from(std::env::var_os("HOME").unwrap()));
+        // A command that exits the shell leaves no trailer: directory unchanged.
+        let (stdout, _, _) = run_shell(sh, dir.path(), "exit 3").await;
+        assert_eq!(split_pwd_marker(&stdout).1, None);
+    }
+
+    /// The status the pane reports is the command's, not the trailer's, in
+    /// both shell families. Fish is the user's shell, so its branch runs for
+    /// real when fish is installed.
+    #[tokio::test]
+    async fn the_exit_status_is_the_commands_not_the_trailers() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut shells = vec![PathBuf::from("/bin/sh")];
+        if let Some(fish) = crate::providers::process::find_in_path("fish") {
+            shells.push(fish);
+        }
+        for shell in shells {
+            let (_, _, ok) = run_shell(&shell, dir.path(), "cd nope-not-here").await;
+            assert!(!ok, "{}: a failed cd must not read as success", shell.display());
+            let (stdout, _, ok) = run_shell(&shell, dir.path(), "echo fine").await;
+            assert!(ok, "{}", shell.display());
+            let (out, pwd) = split_pwd_marker(&stdout);
+            assert_eq!(out.trim(), "fine", "{}", shell.display());
+            assert_eq!(
+                pwd.map(|p| p.canonicalize().unwrap()),
+                Some(dir.path().canonicalize().unwrap()),
+                "{}",
+                shell.display()
+            );
+        }
     }
 
     #[test]
-    fn tab_completes_the_cd_argument() {
+    fn the_pwd_trailer_is_split_off_cleanly() {
+        // `echo a; echo b` ends with its own newline; the trailer adds one
+        // more before the marker. Only the trailer's is stripped.
+        let (out, pwd) = split_pwd_marker(&format!("a\nb\n\n{PWD_MARKER}/tmp/x\n"));
+        assert_eq!(out, "a\nb\n");
+        assert_eq!(pwd, Some(PathBuf::from("/tmp/x")));
+        let (out, pwd) = split_pwd_marker("no trailer at all");
+        assert_eq!(out, "no trailer at all");
+        assert_eq!(pwd, None);
+    }
+
+    #[test]
+    fn tab_completes_the_last_word_against_files_and_directories() {
         let dir = tempfile::tempdir().unwrap();
         for name in ["alpha", "alpine", "beta", ".hidden"] {
             std::fs::create_dir(dir.path().join(name)).unwrap();
         }
+        std::fs::write(dir.path().join("notes.md"), "").unwrap();
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = dir.path().to_path_buf();
         app.input_mode = InputMode::Shell;
@@ -2144,19 +2281,30 @@ mod tests {
         app.handle_key(code(KeyCode::Tab));
         assert_eq!(app.shell_line, "cd beta/");
 
-        app.shell_line = "cd al".into();
+        app.shell_line = "cat no".into();
         app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "cd alp");
-        assert!(app.notice.as_deref().unwrap_or("").contains("alpha"));
-        assert!(app.notice.as_deref().unwrap_or("").contains("alpine"));
+        assert_eq!(app.shell_line, "cat notes.md ");
 
-        // Hidden directories only offer themselves to a dotted prefix.
-        app.shell_line = "cd ".into();
+        app.shell_line = "ls al".into();
         app.handle_key(code(KeyCode::Tab));
-        assert!(!app.notice.as_deref().unwrap_or("").contains(".hidden"));
-        app.shell_line = "cd .h".into();
+        assert_eq!(app.shell_line, "ls alp");
+        let notice = app.notice.clone().unwrap_or_default();
+        assert!(
+            notice.contains("alpha/") && notice.contains("alpine/"),
+            "{notice}"
+        );
+
+        // Hidden entries only offer themselves to a dotted prefix, and a bare
+        // command name is not completed.
+        app.shell_line = "ls ".into();
         app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.shell_line, "cd .hidden/");
+        assert!(!app.notice.clone().unwrap_or_default().contains(".hidden"));
+        app.shell_line = "ls .h".into();
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.shell_line, "ls .hidden/");
+        app.shell_line = "gi".into();
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.shell_line, "gi");
     }
 
     /// In shell mode the letters go to the shell line, and the Ctrl actions

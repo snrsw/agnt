@@ -104,13 +104,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // never changes the height of anything.
     let status_h = 2 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
 
-    // No detail pane: a session's details belong on its own row, where the
-    // cursor already is. The selected row carries them and the others do not,
-    // so the list keeps its height as the cursor moves — the row being left
-    // shrinks by exactly what the row being entered grows by.
-    let [header, body, compose, status] = Layout::vertical([
+    // In shell mode, command output takes a pane between the list and the
+    // prompt: a rule, then the newest lines, up to a third of the screen. The
+    // list keeps the rest. Out of shell mode the pane is gone and the list
+    // has its rows back.
+    let shell_h = if app.input_mode == InputMode::Shell && (!app.shell_output.is_empty() || app.shell_busy) {
+        let want = app.shell_output.len() as u16 + u16::from(app.shell_busy) + 1;
+        want.min((area.height / 3).max(4))
+    } else {
+        0
+    };
+
+    let [header, body, shell, compose, status] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Min(3),
+        Constraint::Length(shell_h),
         Constraint::Length(compose_h),
         Constraint::Length(status_h),
     ])
@@ -118,9 +126,44 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     draw_header(frame, header, app);
     draw_table(frame, body, app);
+    if shell_h > 0 {
+        draw_shell_pane(frame, shell, app);
+    }
     draw_compose(frame, compose, app);
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
+}
+
+/// The newest shell output that fits. Command echoes take the accent so the
+/// pane reads like a terminal scrollback; everything else is as printed.
+fn draw_shell_pane(frame: &mut Frame, outer: Rect, app: &App) {
+    let block = Block::default().borders(Borders::TOP).border_style(theme::rule());
+    let area = with_margin(block.inner(outer));
+    let width = area.width as usize;
+    let rows = area.height as usize;
+
+    let mut lines: Vec<Line> = Vec::with_capacity(rows);
+    let mut tail: Vec<&String> = app
+        .shell_output
+        .iter()
+        .rev()
+        .take(rows.saturating_sub(usize::from(app.shell_busy)))
+        .collect();
+    tail.reverse();
+    for raw in tail {
+        let shown = text::truncate_to_width(raw, width);
+        if raw.starts_with("$ ") {
+            lines.push(Line::styled(shown, theme::accent()));
+        } else {
+            lines.push(Line::raw(shown));
+        }
+    }
+    if app.shell_busy {
+        lines.push(Line::styled("…", theme::muted()));
+    }
+
+    frame.render_widget(block, outer);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Three lines and a gap, the shape the agent view uses: what this is, where
@@ -182,7 +225,7 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
         InputMode::Shell => (
             "$ ",
             &app.shell_line,
-            "cd <directory>   ·   shift-tab back to tasks",
+            "run a command; cd to choose where the next session starts",
         ),
     };
     let input = if typed.is_empty() {
@@ -599,11 +642,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let hint = match app.input_mode {
-        InputMode::Shell => "enter to cd · tab to complete · shift-tab back to tasks",
+        InputMode::Shell => "enter to run · tab to complete · shift-tab back to tasks",
         InputMode::Task if !app.draft.buffer.trim().is_empty() => {
             "enter to start · tab for agent · esc to clear"
         }
-        InputMode::Task => "type to start a session · enter to attach · shift-tab to cd · ? for shortcuts",
+        InputMode::Task => {
+            "type to start a session · enter to attach · shift-tab for a shell · ? for shortcuts"
+        }
     };
     lines.push(Line::from(text::truncate_to_width(hint, width)));
 
@@ -640,7 +685,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "enter           start it, or attach to the selected row when the prompt is empty".into(),
                 "up / down       move".into(),
                 "tab             the new session's agent".into(),
-                "shift-tab       switch the text area to shell mode: cd, pwd, tab to complete".into(),
+                "shift-tab       switch the text area to a shell: runs in $SHELL, cd sets the session dir".into(),
                 "".into(),
                 "ctrl+t          cycle view: status, repository, workflow".into(),
                 "ctrl+f          search".into(),
@@ -1054,7 +1099,7 @@ mod tests {
         let mut app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
         app.input_mode = InputMode::Shell;
         let out = render(&app, 120, 24);
-        assert!(has(&out, "$ cd <directory>"), "{out}");
+        assert!(has(&out, "$ run a command"), "{out}");
         assert!(has(&out, "shift-tab back to tasks"), "{out}");
 
         app.shell_line = "cd ~/src".into();
@@ -1064,6 +1109,25 @@ mod tests {
         assert!(has(&out, "no such directory"), "{out}");
         // The task caret is not drawn while the shell face is up.
         assert!(!has(&out, "> "), "{out}");
+    }
+
+    /// Command output appears in a pane above the prompt in shell mode, with
+    /// the echoed command, and is gone again in task mode.
+    #[test]
+    fn the_shell_pane_shows_output_only_in_shell_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session("a", "x", RuntimeState::Idle)]);
+        app.input_mode = InputMode::Shell;
+        app.shell_output = vec!["$ ls".into(), "Cargo.toml".into(), "src".into()];
+        let out = render(&app, 120, 24);
+        let pane = out.lines().position(|l| l.contains("$ ls")).unwrap();
+        let prompt = out.lines().position(|l| l.contains("run a command")).unwrap();
+        assert!(pane < prompt, "{out}");
+        assert!(has(&out, "Cargo.toml"), "{out}");
+
+        app.input_mode = InputMode::Task;
+        let out = render(&app, 120, 24);
+        assert!(!has(&out, "Cargo.toml"), "{out}");
     }
 
     /// A long task must stay readable rather than being clipped to one line.
