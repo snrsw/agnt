@@ -82,7 +82,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // A rule above and below: the prompt is a box, not another list row.
     let compose_h = 1 + input_h + 1 + 1;
 
-    let status_h = 1 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
+    // Detail line, then any problems, then the key hint. The detail line is
+    // always there — blank when nothing is selected — so the cursor moving
+    // never changes the height of anything.
+    let status_h = 2 + u16::from(app.metadata_error.is_some()) + u16::from(app.has_provider_problem());
 
     // No detail pane: a session's details belong on its own row, where the
     // cursor already is. The selected row carries them and the others do not,
@@ -260,25 +263,10 @@ fn state_style(state: RuntimeState) -> Style {
     theme::state(state)
 }
 
-/// The extra lines the selected row shows: where it is, how it is filed, and
-/// its short id — the things the card's own two lines leave out. Dim, so an
-/// expanded row does not shout over the list around it.
-fn detail_lines(v: &SessionView, width: usize, indent: usize) -> Vec<Line<'static>> {
-    let pad = " ".repeat(indent);
-    let mut out = Vec::new();
-
-    if let Some(preview) = v.session.preview.as_deref().filter(|p| !p.trim().is_empty()) {
-        out.push(Line::styled(
-            text::truncate_to_width(&format!("{pad}{}", text::sanitize(preview)), width),
-            Style::default().add_modifier(Modifier::DIM),
-        ));
-    }
-
-    // Kept to roughly the width of the card above it. A full absolute path
-    // was twice as wide as any other line on screen, so it jumped out from
-    // under the cursor wherever the cursor went; the shortened form keeps
-    // the tail, which is the part that identifies the checkout. The default
-    // classification is left unsaid — "unclassified" tells you nothing.
+/// What the footer says about the selected session: where it is, how it is
+/// filed, and its short id. One line, always present, so moving the cursor
+/// changes what it says and never where anything sits.
+fn detail_text(v: &SessionView) -> String {
     let mut facts = short_path(&v.session.cwd);
     if v.workflow() != WorkflowState::Unclassified {
         facts.push_str(&format!("  ·  {}", v.workflow().label().to_lowercase()));
@@ -287,11 +275,10 @@ fn detail_lines(v: &SessionView, width: usize, indent: usize) -> Vec<Line<'stati
     if v.is_hidden() {
         facts.push_str("  ·  hidden");
     }
-    out.push(Line::styled(
-        text::truncate_to_width(&format!("{pad}{}", text::sanitize(&facts)), width),
-        Style::default().add_modifier(Modifier::DIM),
-    ));
-    out
+    if let Some(preview) = v.session.preview.as_deref().filter(|p| !p.trim().is_empty()) {
+        facts.push_str(&format!("  ·  {}", text::sanitize(preview)));
+    }
+    facts
 }
 
 /// A session as two lines: the task, then everything that qualifies it.
@@ -351,32 +338,17 @@ fn card_lines(
     } else {
         theme::muted()
     };
-    let mut lines = vec![
+    // Always two lines. The selected row changes colour, never height: a row
+    // that grew under the cursor pushed every row below it as the cursor
+    // moved, and the list looked as though it was shuffling.
+    vec![
         Line::from(first),
         Line::styled(text::truncate_to_width(&second, width), meta_style),
-    ];
-    if selected {
-        lines.extend(detail_lines(v, width, W_GLYPH + 2));
-    }
-    lines
+    ]
 }
 
 /// A session as one line under a repository heading. The repository is already
 /// on the group row, so the branch is what tells two rows apart.
-fn compact_lines(
-    v: &SessionView,
-    width: usize,
-    now: DateTime<Utc>,
-    suffix: &str,
-    selected: bool,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![compact_line(v, width, now, suffix)];
-    if selected {
-        lines.extend(detail_lines(v, width, W_GLYPH + 2));
-    }
-    lines
-}
-
 fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str) -> Line<'static> {
     let age = v.age(now).unwrap_or_default();
     let fixed = W_GLYPH + W_AGENT + 1 + W_BRANCH + 1 + W_LINKS + 1 + 4;
@@ -541,7 +513,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                 let lines = if app.view.is_cards() {
                     card_lines(v, total, now, selected, &suffix)
                 } else {
-                    compact_lines(v, total, now, &suffix, selected)
+                    vec![compact_line(v, total, now, &suffix)]
                 };
                 ListItem::new(gutter(lines, selected)).style(style)
             }
@@ -561,6 +533,11 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
     let mut lines = Vec::new();
+
+    // The selected session's details live here, on a line that is always
+    // present, rather than on the row itself.
+    let detail = app.selected_view().map(|v| detail_text(&v)).unwrap_or_default();
+    lines.push(Line::from(text::truncate_to_width(&detail, width)));
 
     if let Some(err) = &app.metadata_error {
         lines.push(Line::from(text::truncate_to_width(
@@ -881,10 +858,36 @@ mod tests {
         assert!(has(&out, "stop first, then hide"), "{out}");
     }
 
-    /// Details belong to the row the cursor is on, not to a pane four rows
-    /// away. Only the selected row carries them.
+    /// Every row keeps its place as the cursor moves. Only the cursor moves.
     #[test]
-    fn only_the_selected_row_shows_its_details() {
+    fn rows_do_not_move_when_the_cursor_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![
+                session("a", "First", RuntimeState::Idle),
+                session("b", "Second", RuntimeState::Idle),
+                session("c", "Third", RuntimeState::Idle),
+            ],
+        );
+        let positions = |app: &App| -> Vec<usize> {
+            let out = render(app, 120, 30);
+            ["First", "Second", "Third"]
+                .iter()
+                .map(|t| out.lines().position(|l| l.contains(t)).unwrap())
+                .collect()
+        };
+        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
+        let on_first = positions(&app);
+        app.selected = Some(SessionKey::new(Provider::Claude, "c"));
+        let on_third = positions(&app);
+        assert_eq!(on_first, on_third);
+    }
+
+    /// The selected session's details sit on one fixed footer line, below
+    /// the prompt, not on the row.
+    #[test]
+    fn the_selected_details_are_on_a_fixed_footer_line() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(
             &dir,
@@ -895,43 +898,24 @@ mod tests {
         );
         app.selected = Some(SessionKey::new(Provider::Claude, "a"));
         let out = render(&app, 120, 24);
+        let lines: Vec<&str> = out.lines().collect();
 
-        // The full path is on the selected row and nowhere else.
+        let detail = lines
+            .iter()
+            .position(|l| l.contains("/Users/me/src/api"))
+            .unwrap();
+        let prompt = lines.iter().position(|l| l.contains("Describe a task")).unwrap();
+        let title = lines
+            .iter()
+            .position(|l| l.contains("Fix the auth handler"))
+            .unwrap();
+        assert!(detail > prompt, "detail should be below the prompt\n{out}");
+        assert!(detail > title, "{out}");
         assert_eq!(
-            out.lines().filter(|l| l.contains("/Users/me/src/api")).count(),
+            lines.iter().filter(|l| l.contains("/Users/me/src/api")).count(),
             1,
             "{out}"
         );
-        // It sits directly under the selected card, not at the bottom.
-        let title = out
-            .lines()
-            .position(|l| l.contains("Fix the auth handler"))
-            .unwrap();
-        let detail = out.lines().position(|l| l.contains("/Users/me/src/api")).unwrap();
-        assert_eq!(detail, title + 2, "{out}");
-    }
-
-    /// The expanded row must not be much wider than the card it belongs to,
-    /// or it jumps out from under the cursor wherever the cursor goes.
-    #[test]
-    fn the_detail_line_stays_close_to_the_card_width() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut s = session("a", "rust project scaffolding", RuntimeState::Idle);
-        s.cwd = "/Users/me/src/github.com/someone/agnt/.claude/worktrees/scaffold".into();
-        let mut app = app_with(&dir, vec![s]);
-        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
-        let out = render(&app, 140, 24);
-
-        let width_of = |needle: &str| {
-            out.lines()
-                .find(|l| l.contains(needle))
-                .map(|l| l.trim_end().width())
-                .unwrap_or_else(|| panic!("no line with {needle} in\n{out}"))
-        };
-        let card = width_of("Claude · Idle");
-        let detail = width_of("scaffold ·");
-        assert!(detail <= card + 24, "detail {detail} vs card {card}\n{out}");
-        // The default classification is not printed.
         assert!(!has(&out, "unclassified"), "{out}");
     }
 

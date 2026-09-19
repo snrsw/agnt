@@ -108,45 +108,22 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
 
-**A session's details belong to its own row, not to a pane.** The selected row expands in place to show its absolute path, its classification and its short id — and its latest preview once a provider can supply one:
+**Rows never change height. Only the cursor moves.** Every card is two lines and every compact row is one, whichever is selected. The selected session's remaining details — its shortened path, its classification when one is set, its short id, and a preview once a provider can supply one — sit on a single footer line that is always present, blank when nothing is selected:
 
 ```
 > ● claude-code-action auth subscription                      issue #880
     Claude · Needs input · reed · 34d
-      /Users/me/src/reed  ·  unclassified  ·  5175105c
+  ○ review pr #985
+    Claude · Idle · reed · 1h
+──────────────────────────────────────────────────────────────────────────
+> Describe a task for a new session
+  Claude · ~/src/reed
+──────────────────────────────────────────────────────────────────────────
+…/GrassAI-Inc/reed · 5175105c
+type to start a session · enter to attach · ? for shortcuts
 ```
 
-A separate detail pane was built first and dropped. It cost four rows permanently to repeat the state, the repository and the links already on the card, and it put those details four rows from the cursor. Because only the selected row expands, the list keeps its height as the cursor moves: the row being left shrinks by exactly what the row being entered grows by.
-
-| Key in the list | Operation |
-| --- | --- |
-| type | Write a task for a new session. The prompt is always live |
-| Enter | Start it; on an empty prompt, attach or resume the selected row, asking when the state does not decide |
-| Up / Down | Move between rows, wrapping at both ends |
-| Tab / Shift+Tab | The new session's agent / directory |
-| Ctrl+T | Cycle the view: status cards, repository rows, workflow cards |
-| Ctrl+F | Local search over title, path, and related number |
-| Ctrl+O | Show stopped sessions and saved history, folded away by default |
-| Ctrl+Y | Show rows hidden from the list |
-| Ctrl+R | Request an asynchronous refresh |
-| Ctrl+X | Hide the selected row, or restore a hidden one. When running, choose between continuing and hiding, or stopping then hiding |
-| Ctrl+G | Change work classification |
-| Ctrl+L | Register or edit a PR / issue URL |
-| Ctrl+U / Ctrl+W | Clear the prompt / delete a word |
-| ? | The full key list, on an empty prompt |
-| Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
-
-**Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those.
-
-`Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row. This is one key doing the obvious thing in both states rather than two keys to remember.
-
-The footer carries only what is useful in the current state: a few keys when the prompt is empty, the start keys when it is not. The full list is behind `?`, not across the bottom of the screen.
-
-The new-session prompt sits below the detail pane and is always on screen, showing the agent and directory a new session would use. Requiring only the task text is deliberate: naming an agent and a path every time was the slowest part of starting work, and both have reasonable defaults. Tab and Shift+Tab change them rather than a Ctrl chord, because Ctrl+A and Ctrl+D mean line-start and delete in a field holding prose.
-
-Starting differs by provider and is not smoothed over. A provider with a background start returns an identity and the row appears at once. A provider that only starts interactively is given the terminal, and its conversation joins the list at the next discovery; no identity is invented for a session that does not have one yet.
-
-These keys apply only while the list owns the terminal. While an official CLI screen is open, that CLI's keys apply. The shared "back to the list" key is decided by the P0 results. It is not assumed that agnt can intercept keys while terminal ownership has been handed over.
+Two earlier shapes were built and dropped. A separate four-line pane repeated the state, repository and links already on the card, four rows from the cursor. Expanding the selected row in place was tried next; it kept the list's total height, but every row below the cursor still moved by a line each time the cursor did, and on a screen recording the list looked as though it was shuffling. A fixed footer line costs one row and moves nothing.
 
 ## 4. Architecture
 
