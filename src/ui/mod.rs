@@ -191,7 +191,12 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
     };
 
     let cwd = app.new_session_cwd(&app.draft);
-    let target = format!("  {} · {}", app.draft.provider.label(), short_path(&cwd));
+    let target = format!(
+        "  {} {} · {}",
+        app.draft.provider.icon(),
+        app.draft.provider.label(),
+        short_path(&cwd)
+    );
 
     frame.render_widget(block, outer);
     frame.render_widget(input, input_area);
@@ -250,7 +255,8 @@ fn links_text(v: &SessionView) -> String {
 }
 
 /// Column widths in terminal cells.
-const W_AGENT: usize = 6;
+const W_AGENT: usize = 8;
+const W_ICON: usize = 2;
 const W_BRANCH: usize = 22;
 const W_LINKS: usize = 20;
 const W_MARKER: usize = 2;
@@ -306,7 +312,7 @@ fn card_lines(
 ) -> Vec<Line<'static>> {
     let links = links_text(v);
     let links_w = if links.is_empty() { 0 } else { links.width() + 2 };
-    let title_w = width.saturating_sub(W_GLYPH + links_w).max(4);
+    let title_w = width.saturating_sub(W_GLYPH + W_ICON + links_w).max(4);
 
     // A session with no name falls back to its id. An id is not a title, so it
     // is not styled like one — bolding it draws the eye to the least
@@ -322,6 +328,12 @@ fn card_lines(
         Span::styled(
             text::pad_to_width(state_glyph(v.state()), W_GLYPH),
             state_style(v.state()),
+        ),
+        // The provider's mark, dim so it identifies without competing with
+        // the state glyph beside it or the title after it.
+        Span::styled(
+            text::pad_to_width(v.session.provider().icon(), W_ICON),
+            theme::muted(),
         ),
         Span::styled(
             text::pad_to_width(&format!("{}{suffix}", text::sanitize(&title)), title_w),
@@ -378,7 +390,10 @@ fn compact_line(v: &SessionView, width: usize, now: DateTime<Utc>, suffix: &str)
             text::pad_to_width(state_glyph(v.state()), W_GLYPH),
             state_style(v.state()),
         ),
-        Span::raw(text::pad_to_width(v.session.provider().label(), W_AGENT)),
+        Span::raw(text::pad_to_width(
+            &format!("{} {}", v.session.provider().icon(), v.session.provider().label()),
+            W_AGENT,
+        )),
         Span::raw(" "),
         Span::styled(
             text::pad_to_width(&format!("{}{suffix}", text::sanitize(&title)), title_w),
@@ -624,6 +639,8 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "".into(),
                 "ctrl+u / ctrl+w clear the prompt / delete a word".into(),
                 "ctrl+c          quit. Sessions keep running; see docs/design.md §7".into(),
+                "".into(),
+                "◆ Claude   ▲ Codex      ● needs you   * working   ○ idle   · stopped   ? unconfirmed".into(),
                 "".into(),
                 "any key closes this".into(),
             ],
@@ -889,6 +906,36 @@ mod tests {
         assert!(has(&out, "Delete (hide)"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
+    }
+
+    /// Each provider has a mark on the title line, so a Claude session and a
+    /// Codex session can be told apart without reading the line below.
+    #[test]
+    fn the_title_line_carries_the_provider_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut codex = session("c", "Investigate a flaky test", RuntimeState::Running);
+        codex.key = SessionKey::new(Provider::Codex, "c");
+        let app = app_with(
+            &dir,
+            vec![session("a", "Fix the auth handler", RuntimeState::Idle), codex],
+        );
+        let out = render(&app, 120, 24);
+        let claude = out.lines().find(|l| l.contains("Fix the auth handler")).unwrap();
+        let codex = out
+            .lines()
+            .find(|l| l.contains("Investigate a flaky test"))
+            .unwrap();
+        assert!(claude.contains("◆"), "{claude:?}");
+        assert!(!claude.contains("▲"), "{claude:?}");
+        assert!(codex.contains("▲"), "{codex:?}");
+        assert!(!codex.contains("◆"), "{codex:?}");
+
+        // The compact view carries it in the agent column.
+        let mut app = app;
+        app.view = crate::model::View::Repository;
+        let out = render(&app, 120, 24);
+        assert!(has(&out, "◆ Claude"), "{out}");
+        assert!(has(&out, "▲ Codex"), "{out}");
     }
 
     /// Every row keeps its place as the cursor moves. Only the cursor moves.

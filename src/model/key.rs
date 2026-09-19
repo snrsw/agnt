@@ -31,6 +31,22 @@ impl Provider {
             Provider::Codex => "Codex",
         }
     }
+
+    /// A one-cell mark that tells the two apart on a title line.
+    ///
+    /// Both come from Geometric Shapes, the block the state glyphs are drawn
+    /// from, because that block is known to render at one cell on the
+    /// terminals this has been tried on; a mark from a rarer block can fall
+    /// back to another font and shift the row. The shapes are arbitrary —
+    /// neither tool has a brand mark that survives as a single monospace
+    /// cell — so the shortcuts sheet carries a legend, and the word stays on
+    /// the line below.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Provider::Claude => "◆",
+            Provider::Codex => "▲",
+        }
+    }
 }
 
 impl fmt::Display for Provider {

@@ -60,6 +60,15 @@ The two agents start differently, and the difference is visible rather than smoo
 
 Named ANSI colours only, so the list takes your terminal's theme rather than bringing its own: amber for needs-you, green for working, magenta for PR and issue links, blue for the cursor bar. Colour never carries meaning alone — every state also has a glyph and a word.
 
+Each title line starts with two marks: the state, then the provider.
+
+```
+● ◆ claude-code-action auth subscription     ← needs you, Claude
+* ▲ investigate a flaky test                 ← working, Codex
+```
+
+`◆` is Claude and `▲` is Codex. Neither tool has a brand mark that survives as a single monospace cell, so the shapes are arbitrary; `?` shows the legend, and the word is on the line below.
+
 ### The two views
 
 `Ctrl+T` switches what the list is shaped around.
