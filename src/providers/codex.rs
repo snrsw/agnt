@@ -38,6 +38,16 @@ pub const APP_SERVER_REASON: &str =
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How far back the history reader looks.
+///
+/// "Saved past sessions" is not "every conversation ever had". Codex keeps
+/// rollout files indefinitely, and on the machine this was built against 41 of
+/// 46 were more than four months old — finished work, not work anyone is going
+/// back to. The list is for returning to what you left, so it stops at a month
+/// and says how many it passed over. `codex resume` remains the way to reach
+/// anything older.
+pub const HISTORY_WINDOW_DAYS: i64 = 30;
+
 /// The `session_meta` record that opens every rollout file.
 #[derive(Debug, Clone, Deserialize)]
 struct RolloutLine {
@@ -87,6 +97,7 @@ struct IndexLine {
 pub struct CodexAdapter {
     binary: Option<PathBuf>,
     home: Option<PathBuf>,
+    window: chrono::Duration,
 }
 
 impl CodexAdapter {
@@ -94,6 +105,7 @@ impl CodexAdapter {
         Self {
             binary: find_in_path(BINARY),
             home: default_codex_home(),
+            window: chrono::Duration::days(HISTORY_WINDOW_DAYS),
         }
     }
 
@@ -101,12 +113,19 @@ impl CodexAdapter {
         Self {
             binary: Some(path.into()),
             home: default_codex_home(),
+            window: chrono::Duration::days(HISTORY_WINDOW_DAYS),
         }
     }
 
     /// Point the history reader at a different `~/.codex`, for tests.
     pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
         self.home = Some(home.into());
+        self
+    }
+
+    /// Widen or narrow how far back history is read.
+    pub fn with_window(mut self, window: chrono::Duration) -> Self {
+        self.window = window;
         self
     }
 
@@ -142,7 +161,7 @@ pub fn default_codex_home() -> Option<PathBuf> {
 ///
 /// Only the first line of each file is read, so cost grows with the number of
 /// conversations rather than their length.
-pub fn read_history(home: &Path) -> Vec<Session> {
+pub fn read_history(home: &Path, cutoff: Option<DateTime<Utc>>) -> (Vec<Session>, usize) {
     let titles = read_titles(home);
     let mut newest: BTreeMap<String, (DateTime<Utc>, SessionMeta)> = BTreeMap::new();
 
@@ -165,7 +184,21 @@ pub fn read_history(home: &Path) -> Vec<Session> {
         }
     }
 
-    newest
+    // Age out whole conversations, after folding their rollouts together, so a
+    // thread is judged by when it was last touched rather than by when some
+    // fork of it started.
+    let mut older = 0usize;
+    if let Some(cutoff) = cutoff {
+        newest.retain(|_, (at, _)| {
+            let keep = *at >= cutoff;
+            if !keep {
+                older += 1;
+            }
+            keep
+        });
+    }
+
+    let sessions = newest
         .into_iter()
         .map(|(id, (at, meta))| {
             let key = SessionKey::new(Provider::Codex, &id);
@@ -189,7 +222,8 @@ pub fn read_history(home: &Path) -> Vec<Session> {
             };
             s
         })
-        .collect()
+        .collect();
+    (sessions, older)
 }
 
 /// `session_index.jsonl` maps a thread id to its name. Later lines win, since
@@ -283,10 +317,11 @@ impl Adapter for CodexAdapter {
         let Some(home) = self.home.clone() else {
             return Err(self.unsupported(Operation::Discover, "no CODEX_HOME or HOME to read"));
         };
+        let cutoff = Some(Utc::now() - self.window);
         // Blocking file walk, kept off the runtime's async workers.
-        let sessions = tokio::time::timeout(
+        let (sessions, older) = tokio::time::timeout(
             READ_TIMEOUT,
-            tokio::task::spawn_blocking(move || read_history(&home)),
+            tokio::task::spawn_blocking(move || read_history(&home, cutoff)),
         )
         .await
         .map_err(|_| AdapterError::Timeout {
@@ -299,10 +334,20 @@ impl Adapter for CodexAdapter {
             stderr: e.to_string(),
         })?;
 
-        let note = format!(
-            "{} saved conversations from ~/.codex/sessions; running state needs the App Server",
-            sessions.len()
-        );
+        // The scope has to be visible: a reader that silently drops rows is
+        // indistinguishable from one that failed.
+        let days = self.window.num_days();
+        let note = if older > 0 {
+            format!(
+                "{} conversations from the last {days}d ({older} older not read); running state needs the App Server",
+                sessions.len()
+            )
+        } else {
+            format!(
+                "{} conversations from the last {days}d; running state needs the App Server",
+                sessions.len()
+            )
+        };
         Ok(Discovery {
             sessions,
             scope_note: note,
@@ -402,7 +447,7 @@ mod tests {
             )],
             Some(r#"{"id":"01a07697-25db-7b01-ad8b-1aa4ce86c953","thread_name":"Update the PRV version"}"#),
         );
-        let sessions = read_history(home.path());
+        let (sessions, _) = read_history(home.path(), None);
         assert_eq!(sessions.len(), 1);
         let s = &sessions[0];
         assert_eq!(s.key.native_session_id, "01a07697-25db-7b01-ad8b-1aa4ce86c953");
@@ -432,7 +477,7 @@ mod tests {
             ],
             None,
         );
-        let sessions = read_history(home.path());
+        let (sessions, _) = read_history(home.path(), None);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].cwd, PathBuf::from("/new/path"));
     }
@@ -462,7 +507,7 @@ mod tests {
             ],
             None,
         );
-        let sessions = read_history(home.path());
+        let (sessions, _) = read_history(home.path(), None);
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].key.native_session_id.starts_with("1111"));
     }
@@ -498,15 +543,130 @@ mod tests {
             ],
             None,
         );
-        let sessions = read_history(home.path());
+        let (sessions, _) = read_history(home.path(), None);
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].key.native_session_id.starts_with("3333"));
+    }
+
+    /// Codex keeps rollout files forever. The list is for work you might go
+    /// back to, so old conversations are left out — and counted, because a
+    /// reader that silently drops rows cannot be told from one that failed.
+    #[test]
+    fn conversations_older_than_the_window_are_left_out_and_counted() {
+        let recent = Utc::now() - chrono::Duration::days(3);
+        let stale = Utc::now() - chrono::Duration::days(200);
+        let stamp = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        let home = home_with(
+            &[
+                (
+                    "rollout-recent.jsonl",
+                    meta_line(
+                        "11111111-1111-1111-1111-111111111111",
+                        "/a",
+                        &stamp(recent),
+                        "\"cli\"",
+                    ),
+                ),
+                (
+                    "rollout-old-a.jsonl",
+                    meta_line(
+                        "22222222-2222-2222-2222-222222222222",
+                        "/b",
+                        &stamp(stale),
+                        "\"cli\"",
+                    ),
+                ),
+                (
+                    "rollout-old-b.jsonl",
+                    meta_line(
+                        "33333333-3333-3333-3333-333333333333",
+                        "/c",
+                        &stamp(stale),
+                        "\"cli\"",
+                    ),
+                ),
+            ],
+            None,
+        );
+
+        let cutoff = Some(Utc::now() - chrono::Duration::days(30));
+        let (sessions, older) = read_history(home.path(), cutoff);
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].key.native_session_id.starts_with("1111"));
+        assert_eq!(older, 2);
+
+        // Without a cutoff nothing is dropped, which is what tests and a
+        // widened window rely on.
+        let (all, older) = read_history(home.path(), None);
+        assert_eq!(all.len(), 3);
+        assert_eq!(older, 0);
+    }
+
+    /// A conversation is judged by when it was last touched, not by when some
+    /// earlier fork of it started.
+    #[test]
+    fn a_thread_touched_recently_survives_an_old_first_rollout() {
+        let id = "44444444-4444-4444-4444-444444444444";
+        let stamp = |d: i64| {
+            (Utc::now() - chrono::Duration::days(d))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let home = home_with(
+            &[
+                (
+                    "rollout-first.jsonl",
+                    meta_line(id, "/old", &stamp(200), "\"cli\""),
+                ),
+                (
+                    "rollout-latest.jsonl",
+                    meta_line(id, "/new", &stamp(2), "\"cli\""),
+                ),
+            ],
+            None,
+        );
+        let (sessions, older) = read_history(home.path(), Some(Utc::now() - chrono::Duration::days(30)));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].cwd, PathBuf::from("/new"));
+        assert_eq!(older, 0);
+    }
+
+    #[tokio::test]
+    async fn the_scope_note_says_what_was_left_out() {
+        let stamp = |d: i64| {
+            (Utc::now() - chrono::Duration::days(d))
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let home = home_with(
+            &[
+                (
+                    "rollout-a.jsonl",
+                    meta_line("55555555-5555-5555-5555-555555555555", "/a", &stamp(1), "\"cli\""),
+                ),
+                (
+                    "rollout-b.jsonl",
+                    meta_line(
+                        "66666666-6666-6666-6666-666666666666",
+                        "/b",
+                        &stamp(300),
+                        "\"cli\"",
+                    ),
+                ),
+            ],
+            None,
+        );
+        let a = CodexAdapter::with_binary("/usr/bin/true").with_home(home.path());
+        let d = a.discover().await.unwrap();
+        assert!(d.scope_note.contains("1 older not read"), "{}", d.scope_note);
+        assert!(d.scope_note.contains("last 30d"), "{}", d.scope_note);
     }
 
     #[test]
     fn a_missing_codex_home_reads_as_empty() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_history(&dir.path().join("nope")).is_empty());
+        assert!(read_history(&dir.path().join("nope"), None).0.is_empty());
     }
 
     #[tokio::test]

@@ -63,15 +63,15 @@ The two agents start differently, and the difference is visible rather than smoo
 **Status** answers "what needs me now" — cards grouped by state, the task on its own line:
 
 ```
-── Waiting approval or input (1)
+── Needs you (1)
 > ● claude-code-action auth subscription                        issue #880
-    Claude · Waiting input · reed · 34d
+    Claude · Needs input · reed · 34d
 ```
 
 **Repository** answers "what was I doing in reed" — one line each, grouped by repository, with a tally on every heading:
 
 ```
-── reed (15)                                        ● 1  ◐ 0  ○ 3  · 11
+── reed (15)                                        ● 1  * 0  ○ 3  · 11
 > ● Claude claude-code-action auth subscription                      34d
   ○ Claude reed pr 971 review comments    dr5-dedup                  23h
 ```
@@ -81,8 +81,10 @@ Repositories are ordered by what is in them, not by name. A third turn of `Ctrl+
 **Stopped sessions and saved history are folded away**, because they outnumber live work heavily — 50 of 56 rows on the machine this was built on. Their headings stay, marked `▸` and carrying their counts, and `Ctrl+O` brings them back:
 
 ```
-▸ gh-own (16)                                       ● 0  ◐ 0  ○ 0  · 16
+▸ gh-own (16)                                       ● 0  * 0  ○ 0  · 16
 ```
+
+Codex history is also bounded: only conversations touched in the last 30 days are read, and the status line says how many older ones were passed over. Codex keeps rollout files forever, and almost all of them are finished work — `codex resume` is the way back to anything older.
 
 A row is history when it has stopped, or when it exists only as a saved file. A session the provider still lists stays visible even while its state is unconfirmed — otherwise the list would be empty on every cold start, since nothing is confirmed until the first refresh answers.
 

@@ -35,8 +35,10 @@ R06's "delete" differs from full history deletion, so it needs confirmation as a
 | --- | --- | --- |
 | Sessions started by agnt | Required | Start, attach, and stop within the chosen runtime's scope |
 | Live sessions started elsewhere | Whatever the official discovery returns | If the execution location cannot be determined, state is Unknown and attach is marked unsupported |
-| Saved past sessions | Whatever the history provider can retrieve | Resumable does not mean the current execution state is known; that is checked separately |
+| Saved past sessions | Recently touched ones, within a stated window | Resumable does not mean the current execution state is known; that is checked separately |
 | Cloud, other machines, deleted history | Outside the first version's scope | Distinguished as outside the scope of local management |
+
+**Saved history is bounded, and the bound is stated.** "Past sessions" is not "every conversation ever had": Codex keeps rollout files indefinitely, and on the machine this was built against 41 of 46 were more than four months old. The reader stops at 30 days and its scope note says how many it passed over, because a reader that silently drops rows cannot be told from one that failed. Anything older is reached with the provider's own tools — `codex resume` has a picker.
 
 Claude's agent-view JSON list alone does not cover every past ordinary session. P0 investigates the official means of enumerating history and its dependencies. If a version-specific read-only history reader is needed, that decision and the target formats are stated explicitly. "Full history support" is never displayed while it is unimplemented.
 
@@ -76,22 +78,22 @@ The list has two shapes, because it answers two different questions, and Ctrl+T 
 **Status** — cards grouped by execution state, for "what needs me now". The task takes its own line; everything that qualifies it sits underneath in dim text.
 
 ```
-── Waiting approval or input (1)
+── Needs you (1)
 > ● claude-code-action auth subscription                        issue #880
-    Claude · Waiting input · reed · 34d
-── Running (1)
-  ◐ rust project scaffolding                                    PR #1
-    Claude · Running · agnt / scaffold · 4d
+    Claude · Needs input · reed · 34d
+── Working (1)
+  * rust project scaffolding                                    PR #1
+    Claude · Working · agnt / scaffold · 4d
 ```
 
 **Repository** — one line per session, grouped by repository, for "what was I doing in reed". The repository is on the heading, so the branch or worktree is what tells two rows apart, and each heading tallies what is inside it.
 
 ```
-── reed (15)                                        ● 1  ◐ 0  ○ 3  · 11
+── reed (15)                                        ● 1  * 0  ○ 3  · 11
 > ● Claude claude-code-action auth subscription                      34d
   ○ Claude reed pr 971 review comments    dr5-dedup                  23h
-── agnt (1)                                         ● 0  ◐ 1  ○ 0  · 0
-  ◐ Claude rust project scaffolding       scaffold       PR #1        4d
+── agnt (1)                                         ● 0  * 1  ○ 0  · 0
+  * Claude rust project scaffolding       scaffold       PR #1        4d
 ```
 
 A third turn of Ctrl+T gives the same cards grouped by the classification the user set, which is how R04's manual axis is reached.

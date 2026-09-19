@@ -76,7 +76,8 @@ This is the version-specific read-only history reader that design.md §2 permits
 
 - A file proves a conversation existed, never that it is running. Every discovered Codex session is **Unknown**.
 - `source: {"subagent": …}` rollouts belong to another session's turn and are skipped. 3 of 49 files on the test machine.
-- Several rollout files share one thread; they collapse to the newest timestamp.
+- Several rollout files share one thread; they collapse to the newest timestamp, and the thread is aged by that newest one rather than by when some fork of it started.
+- Only the last 30 days are read. 41 of the 46 conversations on the test machine were over four months old; the scope note reports how many were passed over.
 - Titles come from `~/.codex/session_index.jsonl` (`thread_name`), where later lines win.
 
 Codex session IDs are UUIDv7, so conversations started close together **share 8-character prefixes**. Two such collisions existed on the test machine, and `agnt attach 019c3d7f` correctly refuses as ambiguous instead of picking one.
