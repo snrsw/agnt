@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use crate::app::{App, GroupHeader, ListRow, Mode};
 use std::collections::BTreeMap;
 
-use crate::model::{RuntimeState, SessionView, TitleSource, View, text};
+use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, text};
 
 /// The palette. Named ANSI colours only, so the list wears whatever the
 /// terminal is themed with instead of fighting it: amber on a light theme is
@@ -274,8 +274,15 @@ fn detail_lines(v: &SessionView, width: usize, indent: usize) -> Vec<Line<'stati
         ));
     }
 
-    let mut facts = v.session.cwd.to_string_lossy().into_owned();
-    facts.push_str(&format!("  ·  {}", v.workflow().label().to_lowercase()));
+    // Kept to roughly the width of the card above it. A full absolute path
+    // was twice as wide as any other line on screen, so it jumped out from
+    // under the cursor wherever the cursor went; the shortened form keeps
+    // the tail, which is the part that identifies the checkout. The default
+    // classification is left unsaid — "unclassified" tells you nothing.
+    let mut facts = short_path(&v.session.cwd);
+    if v.workflow() != WorkflowState::Unclassified {
+        facts.push_str(&format!("  ·  {}", v.workflow().label().to_lowercase()));
+    }
     facts.push_str(&format!("  ·  {}", v.key().short_id()));
     if v.is_hidden() {
         facts.push_str("  ·  hidden");
@@ -491,7 +498,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
             .into_iter()
             .map(|mut line| {
                 let mark = if selected {
-                    Span::styled("▎ ", theme::accent())
+                    Span::styled("▌ ", theme::accent())
                 } else {
                     Span::raw("  ")
                 };
@@ -902,6 +909,30 @@ mod tests {
             .unwrap();
         let detail = out.lines().position(|l| l.contains("/Users/me/src/api")).unwrap();
         assert_eq!(detail, title + 2, "{out}");
+    }
+
+    /// The expanded row must not be much wider than the card it belongs to,
+    /// or it jumps out from under the cursor wherever the cursor goes.
+    #[test]
+    fn the_detail_line_stays_close_to_the_card_width() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = session("a", "rust project scaffolding", RuntimeState::Idle);
+        s.cwd = "/Users/me/src/github.com/someone/agnt/.claude/worktrees/scaffold".into();
+        let mut app = app_with(&dir, vec![s]);
+        app.selected = Some(SessionKey::new(Provider::Claude, "a"));
+        let out = render(&app, 140, 24);
+
+        let width_of = |needle: &str| {
+            out.lines()
+                .find(|l| l.contains(needle))
+                .map(|l| l.trim_end().width())
+                .unwrap_or_else(|| panic!("no line with {needle} in\n{out}"))
+        };
+        let card = width_of("Claude · Idle");
+        let detail = width_of("scaffold ·");
+        assert!(detail <= card + 24, "detail {detail} vs card {card}\n{out}");
+        // The default classification is not printed.
+        assert!(!has(&out, "unclassified"), "{out}");
     }
 
     /// Moving the cursor must not shuffle the list: the row being left shrinks
