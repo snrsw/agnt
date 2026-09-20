@@ -42,11 +42,12 @@ To start a session, just type what it should do — the prompt at the bottom is 
 
 ```
 ──────────────────────────────────────────────────────────
-> fix the flaky billing test_
-  Claude · ~/src/api
+◆ Claude  ~/src/api  >>> fix the flaky billing test_
 ──────────────────────────────────────────────────────────
 enter to start · tab for agent · esc to clear
 ```
+
+The prompt says where the task is going before it says anything else: the agent that will take it, the directory it will start in, then the caret. Those two used to sit on a line underneath, which meant reading down to answer "where is this going?" while typing across — and they are the subject of the sentence being written, so they belong in front of it, the way a shell puts the directory in front of the command. `Tab` changes the agent and the prompt changes with it. On a narrow terminal the path gives way first, keeping the components that say which checkout it is.
 
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 

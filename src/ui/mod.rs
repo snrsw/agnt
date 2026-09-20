@@ -76,14 +76,6 @@ fn with_margin(area: Rect) -> Rect {
     }
 }
 
-/// How many lines the typed task needs, so the input grows with it.
-fn wrapped_lines(text: &str, width: usize) -> usize {
-    if text.is_empty() || width == 0 {
-        return 1;
-    }
-    text.width().div_ceil(width).max(1)
-}
-
 /// The most rows of shell the text area will grow to.
 ///
 /// A cap, not a height: the box is drawn as tall as the shell is actually
@@ -118,10 +110,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         let used = app.pty.as_ref().map_or(1, |p| p.used_rows());
         1 + used.clamp(1, shell_rows_cap(area.height)) + 1
     } else {
-        let input_w = (area.width as usize).saturating_sub(4 + MARGIN as usize).max(1);
+        // The prompt grows with the task typed into it, up to a third of the
+        // screen. The prefix shares the first line, so the height is what the
+        // two of them wrap to together, plus one cell for the cursor.
+        let width = (area.width as usize).saturating_sub(MARGIN as usize * 2).max(1);
         let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-        let input_h = wrapped_lines(&app.draft.buffer, input_w).min(grow_cap) as u16;
-        1 + input_h + 1 + 1
+        let used = spans_width(&prompt_prefix(app, width)) + app.draft.buffer.width() + 1;
+        1 + used.div_ceil(width).clamp(1, grow_cap) as u16 + 1
     };
 
     // Detail line, then any problems, then the key hint. The detail line is
@@ -243,6 +238,47 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The caret. Three of them rather than one, because what precedes it is a
+/// sentence about where the task is going and the eye needs a hard edge to
+/// find where the typing starts.
+const CARET: &str = ">>> ";
+
+/// What the prompt says before the cursor: which agent will take the task,
+/// and where it will run.
+///
+/// Both used to live on a second line under the prompt, which meant reading
+/// down to answer "where is this going?" while typing across. They are the
+/// subject of the sentence the user is writing, so they belong in front of
+/// it, the way a shell puts the directory in front of the command.
+fn prompt_prefix(app: &App, width: usize) -> Vec<Span<'static>> {
+    let provider = app.draft.provider;
+    // At most a third of the line, so there is always room to type. The
+    // agent and the caret are short and fixed; the path is the part that
+    // has to give.
+    let room = (width / 3).min(40);
+    let active = !app.draft.buffer.trim().is_empty();
+    let caret = if active {
+        theme::accent().add_modifier(Modifier::BOLD)
+    } else {
+        theme::muted()
+    };
+    vec![
+        Span::styled(
+            format!("{} {}", provider.icon(), provider.label()),
+            theme::accent(),
+        ),
+        Span::styled(
+            format!("  {}  ", short_path_within(&app.new_session_cwd(), room)),
+            theme::muted(),
+        ),
+        Span::styled(CARET, caret),
+    ]
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| s.content.as_ref().width()).sum()
+}
+
 /// The new-session prompt. It is always live — typing anywhere in the list
 /// lands here — so it is drawn as an active field rather than as a hint.
 fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
@@ -250,42 +286,20 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme::rule());
     let area = with_margin(block.inner(outer));
-    let width = area.width as usize;
 
-    let [input_area, target_area] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-
-    let (caret, typed, placeholder) = ("> ", &app.draft.buffer, "Describe a task for a new session");
-    let input = if typed.is_empty() {
-        Paragraph::new(Line::from(vec![
-            Span::styled(caret, Style::default().add_modifier(Modifier::DIM)),
-            Span::styled(placeholder, Style::default().add_modifier(Modifier::DIM)),
-        ]))
+    let mut spans = prompt_prefix(app, area.width as usize);
+    if app.draft.buffer.is_empty() {
+        spans.push(Span::styled("Describe a task for a new session", theme::muted()));
     } else {
-        Paragraph::new(Line::from(vec![
-            Span::styled(caret, theme::accent().add_modifier(Modifier::BOLD)),
-            Span::raw(typed.clone()),
-            Span::styled("_", theme::accent()),
-        ]))
-        .wrap(Wrap { trim: false })
-    };
-
-    let cwd = app.new_session_cwd();
-    let target = format!(
-        "  {} {} · {}",
-        app.draft.provider.icon(),
-        app.draft.provider.label(),
-        short_path(&cwd)
-    );
+        spans.push(Span::raw(app.draft.buffer.clone()));
+        spans.push(Span::styled("_", theme::accent()));
+    }
 
     frame.render_widget(block, outer);
-    frame.render_widget(input, input_area);
-    frame.render_widget(
-        Paragraph::new(Line::styled(
-            text::truncate_to_width(&target, width),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
-        target_area,
-    );
+    // Wrapping puts continuation lines at the left margin rather than under
+    // the caret: a task long enough to wrap is easier to read on full-width
+    // lines than in a column the width of what is left after the prefix.
+    frame.render_widget(Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }), area);
 }
 
 /// A directory short enough to sit beside the prompt: `$HOME` becomes `~`,
@@ -293,7 +307,17 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
 /// identify the checkout. Worktree paths are long enough that the head is the
 /// part worth dropping.
 pub fn short_path(path: &std::path::Path) -> String {
-    const MAX: usize = 40;
+    short_path_within(path, 40)
+}
+
+/// The same, but told how much room it has.
+///
+/// The prompt puts the directory in front of what is being typed, so on a
+/// narrow terminal a long path would leave a few columns for the task. The
+/// last components are the ones that identify the checkout, so the head is
+/// what gets dropped.
+pub fn short_path_within(path: &std::path::Path, max: usize) -> String {
+    let max = max.max(8);
     let text = path.to_string_lossy();
     let tilde = match std::env::var_os("HOME") {
         Some(home) => {
@@ -305,7 +329,7 @@ pub fn short_path(path: &std::path::Path) -> String {
         }
         None => text.clone().into_owned(),
     };
-    if tilde.width() <= MAX {
+    if tilde.width() <= max {
         return tilde;
     }
     let parts: Vec<&str> = tilde.split('/').filter(|p| !p.is_empty()).collect();
@@ -313,7 +337,7 @@ pub fn short_path(path: &std::path::Path) -> String {
     let mut used = 1; // the leading ellipsis
     for part in parts.iter().rev() {
         let next = used + part.width() + 1;
-        if next > MAX && !kept.is_empty() {
+        if next > max && !kept.is_empty() {
             break;
         }
         used = next;
@@ -1071,10 +1095,73 @@ mod tests {
                 "expected a rule at {offset:+}, got {line:?}\n{out}"
             );
         };
-        // The prompt is a box: a rule above the text and another below the
-        // agent line, so it never reads as one more row of the list.
+        // The prompt is a box: a rule above the text and another below it, so
+        // it never reads as one more row of the list.
         rule(-1);
-        rule(2);
+        rule(1);
+    }
+
+    /// The prompt says where the task is going, in front of the task: which
+    /// agent will take it and which directory it starts in. Both used to sit
+    /// on a line of their own underneath.
+    #[test]
+    fn the_prompt_says_which_agent_and_where_before_the_caret() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
+
+        let line_with = |app: &App, needle: &str| -> String {
+            render(app, 100, 24)
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} in\n{}", render(app, 100, 24)))
+                .to_string()
+        };
+
+        let empty = line_with(&app, ">>>");
+        assert!(empty.contains("Claude"), "{empty}");
+        assert!(empty.contains("/tmp/some/checkout"), "{empty}");
+        assert!(empty.contains("Describe a task for a new session"), "{empty}");
+        // The agent and the directory come before the caret, not after it.
+        assert!(
+            empty.find("Claude") < empty.find(">>>") && empty.find("/tmp/some/checkout") < empty.find(">>>"),
+            "{empty}"
+        );
+
+        // The agent follows Tab, since that is what Enter will start.
+        app.draft.provider = Provider::Codex;
+        app.draft.buffer = "fix the billing test".into();
+        let typed = line_with(&app, ">>>");
+        assert!(typed.contains("Codex") && !typed.contains("Claude"), "{typed}");
+        assert!(typed.contains(">>> fix the billing test"), "{typed}");
+
+        // And it is one line: the box is a rule, the prompt, a rule.
+        let out = render(&app, 100, 24);
+        let at = out.lines().position(|l| l.contains(">>>")).unwrap();
+        for offset in [at - 1, at + 1] {
+            let rule: &str = out.lines().nth(offset).unwrap();
+            assert!(rule.chars().all(|c| c == '\u{2500}'), "{rule:?}\n{out}");
+        }
+    }
+
+    /// A directory long enough to crowd out the task is shortened, keeping
+    /// the components that say which checkout it is.
+    #[test]
+    fn a_long_directory_gives_way_to_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd =
+            std::path::PathBuf::from("/Users/someone/src/github.com/an-org/a-long-repository-name");
+
+        let wide = render(&app, 120, 24);
+        let wide_line = wide.lines().find(|l| l.contains(">>>")).unwrap();
+        assert!(wide_line.contains("a-long-repository-name"), "{wide_line}");
+
+        let narrow = render(&app, 60, 24);
+        let narrow_line = narrow.lines().find(|l| l.contains(">>>")).unwrap();
+        assert!(narrow_line.contains('\u{2026}'), "{narrow_line}");
+        // The tail is kept: it is what says which checkout this is.
+        assert!(narrow_line.contains("a-long-repository-name"), "{narrow_line}");
     }
 
     #[test]

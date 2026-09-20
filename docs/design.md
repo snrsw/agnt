@@ -118,8 +118,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
   ○ review pr #985
     Claude · Idle · reed · 1h
 ──────────────────────────────────────────────────────────────────────────
-> Describe a task for a new session
-  Claude · ~/src/reed
+◆ Claude  ~/src/reed  >>> Describe a task for a new session
 ──────────────────────────────────────────────────────────────────────────
 …/GrassAI-Inc/reed · 5175105c
 type to start a session · enter to attach · ? for shortcuts
@@ -147,6 +146,10 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 | Ctrl+U / Ctrl+W | Clear the prompt / delete a word |
 | ? | The full key list, on an empty prompt |
 | Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
+
+**The prompt says where the task is going before it says anything else.** The agent that will take it, the directory it will start in, then the caret: `◆ Claude  ~/src/reed  >>>`. Both of the first two had a line of their own underneath the prompt, which meant reading down to answer "where is this going?" while typing across; they are the subject of the sentence being written, so they sit in front of it, the way a shell puts the directory in front of the command. That also gives the row back to the list, since the box is now a rule, one line, and a rule.
+
+The caret is three characters rather than one because what precedes it is a sentence, and the eye needs a hard edge to find where the typing starts. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
 
 **Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
 
