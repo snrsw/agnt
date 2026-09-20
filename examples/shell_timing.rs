@@ -7,10 +7,15 @@
 //! cargo run --example shell_timing -- /bin/sh # something to compare against
 //! ```
 //!
-//! The time is almost always the shell's own configuration rather than agnt —
-//! a `direnv` hook that sources a nix dev shell costs seconds every time a
-//! shell starts, in a terminal as much as here. Comparing against `/bin/sh`,
-//! which loads nothing, says which of the two it is.
+//! It prints each step the shell takes, so a pause has the line responsible
+//! right above it. That is how the worst one was found: fish waited ten
+//! seconds for a reply to its Primary Device Attributes query, which nothing
+//! was sending, and said so in the warning it printed afterwards.
+//!
+//! What is left is the shell's own configuration, which agnt cannot speed up
+//! — a `direnv` hook that sources a nix dev shell costs about 0.15s here, in
+//! a terminal as much as in agnt. Comparing against `/bin/sh`, which loads
+//! nothing, says which of the two a slow start is.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,7 +37,7 @@ fn main() {
     }
 
     println!("cwd: {}", cwd.display());
-    println!("(a shell's startup is its own configuration; agnt only waits for it)\n");
+    println!("(each line is the shell's last output; a gap is where it waited)\n");
     for sh in &shells {
         time_one(sh, &cwd);
     }

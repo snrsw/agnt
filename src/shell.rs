@@ -78,11 +78,206 @@ fn login_shell() -> Option<PathBuf> {
     (!shell.is_empty()).then(|| PathBuf::from(shell))
 }
 
+/// The answers a terminal owes the program running on it.
+///
+/// A shell asks the terminal what it is and waits for the reply before
+/// drawing anything. fish sends a Primary Device Attributes query and waits
+/// **ten seconds** for it, then gives up with a warning — which is exactly
+/// what agnt used to do to it, because `vt100` interprets these sequences but
+/// never answers them, and nothing else was writing back either.
+///
+/// The queries come in a set with Primary DA last, and a reply to that one is
+/// the signal that every earlier query has been answered as far as it is
+/// going to be. So answering DA promptly is what unblocks the shell; the
+/// others are answered because a program that asks deserves an answer, not
+/// because anything waits on them.
+///
+/// What the answers claim is deliberately modest — a VT100 with the advanced
+/// video option, which is close to what `vt100` emulates. Claiming more would
+/// invite a program to send sequences the emulator would then mangle.
+#[derive(Debug, Default)]
+pub struct QueryResponder {
+    /// An escape sequence split across two reads, held until it is whole.
+    pending: Vec<u8>,
+}
+
+/// A partial sequence longer than this is not a sequence. Without a bound,
+/// output that happens to contain a stray `ESC` would grow this forever.
+const MAX_PENDING: usize = 1024;
+
+impl QueryResponder {
+    /// Look through what the shell just wrote and answer anything it asked.
+    ///
+    /// `cursor` is where the cursor is *after* this output was processed,
+    /// because a cursor position report has to describe the screen the shell
+    /// will next draw on.
+    pub fn scan(&mut self, chunk: &[u8], cursor: (u16, u16)) -> Vec<u8> {
+        let buf: Vec<u8> = if self.pending.is_empty() {
+            chunk.to_vec()
+        } else {
+            let mut v = std::mem::take(&mut self.pending);
+            v.extend_from_slice(chunk);
+            v
+        };
+
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < buf.len() {
+            if buf[i] != 0x1b {
+                i += 1;
+                continue;
+            }
+            match parse_sequence(&buf[i..]) {
+                Sequence::Incomplete => {
+                    // Keep the tail so the sequence can be recognised once
+                    // the rest of it arrives.
+                    if buf.len() - i <= MAX_PENDING {
+                        self.pending = buf[i..].to_vec();
+                    }
+                    return out;
+                }
+                Sequence::Complete { len, reply } => {
+                    if let Some(reply) = reply {
+                        out.extend_from_slice(&reply.bytes(cursor));
+                    }
+                    i += len;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// What a query wants back.
+#[derive(Debug, PartialEq, Eq)]
+enum Reply {
+    /// Primary Device Attributes: what kind of terminal this is.
+    PrimaryDa,
+    /// Secondary Device Attributes: which firmware, nominally.
+    SecondaryDa,
+    /// Device status: still here.
+    Ok,
+    /// Where the cursor is, one-based.
+    CursorPosition,
+    /// The kitty keyboard protocol, none of whose modes are supported.
+    KittyKeyboard,
+    /// XTVERSION: the terminal's name.
+    Version,
+    /// A terminfo capability query that cannot be answered.
+    NoCapability,
+}
+
+impl Reply {
+    fn bytes(&self, (row, col): (u16, u16)) -> Vec<u8> {
+        match self {
+            Self::PrimaryDa => b"\x1b[?1;2c".to_vec(),
+            Self::SecondaryDa => b"\x1b[>0;10;1c".to_vec(),
+            Self::Ok => b"\x1b[0n".to_vec(),
+            Self::CursorPosition => format!("\x1b[{};{}R", row + 1, col + 1).into_bytes(),
+            Self::KittyKeyboard => b"\x1b[?0u".to_vec(),
+            Self::Version => b"\x1bP>|agnt\x1b\\".to_vec(),
+            Self::NoCapability => b"\x1bP0+r\x1b\\".to_vec(),
+        }
+    }
+}
+
+enum Sequence {
+    /// A whole sequence, and what it asks for. Every sequence that is not a
+    /// question is `Complete` with no reply — its length is what matters, so
+    /// the scan resumes after it rather than inside it.
+    Complete { len: usize, reply: Option<Reply> },
+    /// The start of one; the rest has not arrived.
+    Incomplete,
+}
+
+/// Recognise one escape sequence at the start of `s`, which begins with ESC.
+///
+/// This is not a terminal parser — `vt100` is doing that. It only needs to
+/// find where each sequence ends, so that the few that are questions can be
+/// answered and everything else skipped without losing the place.
+fn parse_sequence(s: &[u8]) -> Sequence {
+    match s.get(1) {
+        None => Sequence::Incomplete,
+        // CSI: parameters, then a final byte in 0x40..=0x7e.
+        Some(b'[') => {
+            let params_at = 2;
+            let mut i = params_at;
+            while i < s.len() {
+                if (0x40..=0x7e).contains(&s[i]) {
+                    let params = &s[params_at..i];
+                    return Sequence::Complete {
+                        len: i + 1,
+                        reply: csi_reply(params, s[i]),
+                    };
+                }
+                i += 1;
+            }
+            Sequence::Incomplete
+        }
+        // DCS, terminated by ST. The only one asked here is a terminfo
+        // capability query, which is answered with a refusal.
+        Some(b'P') => match find_st(s) {
+            Some(end) => Sequence::Complete {
+                len: end,
+                reply: s
+                    .get(2..4)
+                    .filter(|head| *head == b"+q")
+                    .map(|_| Reply::NoCapability),
+            },
+            None => Sequence::Incomplete,
+        },
+        // OSC, terminated by BEL or ST. Nothing here answers one: the colour
+        // queries would have to invent a colour, and a wrong answer is worse
+        // than none, since the shell themes itself from it.
+        Some(b']') => {
+            if let Some(bel) = s.iter().position(|b| *b == 0x07) {
+                return Sequence::Complete {
+                    len: bel + 1,
+                    reply: None,
+                };
+            }
+            match find_st(s) {
+                Some(end) => Sequence::Complete {
+                    len: end,
+                    reply: None,
+                },
+                None => Sequence::Incomplete,
+            }
+        }
+        // Two-byte escapes, and anything else: one byte of context is enough
+        // to know it is not a question.
+        Some(_) => Sequence::Complete { len: 2, reply: None },
+    }
+}
+
+/// The end of a string-terminated sequence, as a length.
+fn find_st(s: &[u8]) -> Option<usize> {
+    s.windows(2)
+        .position(|w| w == b"\x1b\\")
+        .map(|at| at + 2)
+        .filter(|_| s.len() > 2)
+}
+
+/// Which question a CSI sequence is asking, if it is asking one.
+fn csi_reply(params: &[u8], final_byte: u8) -> Option<Reply> {
+    match (params, final_byte) {
+        (b"" | b"0", b'c') => Some(Reply::PrimaryDa),
+        (b">" | b">0", b'c') => Some(Reply::SecondaryDa),
+        (b"5", b'n') => Some(Reply::Ok),
+        (b"6", b'n') => Some(Reply::CursorPosition),
+        (b"?", b'u') => Some(Reply::KittyKeyboard),
+        (b">" | b">0" | b">1", b'q') => Some(Reply::Version),
+        _ => None,
+    }
+}
+
 /// A running shell on a pseudo-terminal, and the screen it has drawn.
 pub struct PtyShell {
     /// The parsed screen. The reader thread writes, the UI reads.
     parser: Arc<Mutex<vt100::Parser>>,
-    writer: Box<dyn Write + Send>,
+    /// Shared with the reader thread, which answers the shell's questions
+    /// about the terminal as they arrive.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pid: Option<u32>,
@@ -140,22 +335,40 @@ impl PtyShell {
         drop(pair.slave);
 
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
-        let writer = pair.master.take_writer().map_err(std::io::Error::other)?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+            pair.master.take_writer().map_err(std::io::Error::other)?,
+        ));
         let mut reader = pair.master.try_clone_reader().map_err(std::io::Error::other)?;
 
         // The pty read is blocking, so it lives on its own thread and feeds
         // the parser. It ends when the shell closes the pty.
         let sink = Arc::clone(&parser);
+        let back = Arc::clone(&writer);
         std::thread::Builder::new()
             .name("agnt-pty".into())
             .spawn(move || {
                 let mut buf = [0u8; 8192];
+                let mut responder = QueryResponder::default();
                 loop {
                     match reader.read(&mut buf) {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            if let Ok(mut p) = sink.lock() {
-                                p.process(&buf[..n]);
+                            // Process first, then answer: a cursor position
+                            // report has to describe the screen as it is
+                            // after this output, not before it.
+                            let cursor = match sink.lock() {
+                                Ok(mut p) => {
+                                    p.process(&buf[..n]);
+                                    p.screen().cursor_position()
+                                }
+                                Err(_) => (0, 0),
+                            };
+                            let reply = responder.scan(&buf[..n], cursor);
+                            if !reply.is_empty()
+                                && let Ok(mut w) = back.lock()
+                            {
+                                let _ = w.write_all(&reply);
+                                let _ = w.flush();
                             }
                             on_output();
                         }
@@ -224,8 +437,10 @@ impl PtyShell {
     }
 
     pub fn send(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
+        }
     }
 
     /// Where the shell is now, read from the operating system rather than
@@ -414,6 +629,142 @@ mod tests {
         assert_eq!(
             encode_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT)),
             Some(vec![0x1b, b'b'])
+        );
+    }
+
+    /// The query fish blocks on. Ten seconds of agnt's startup was this one
+    /// going unanswered.
+    #[test]
+    fn a_primary_device_attributes_query_is_answered() {
+        let mut r = QueryResponder::default();
+        assert_eq!(r.scan(b"\x1b[0c", (0, 0)), b"\x1b[?1;2c".to_vec());
+        assert_eq!(r.scan(b"\x1b[c", (0, 0)), b"\x1b[?1;2c".to_vec());
+    }
+
+    #[test]
+    fn the_other_questions_a_shell_asks_are_answered_too() {
+        let mut r = QueryResponder::default();
+        assert_eq!(r.scan(b"\x1b[>c", (0, 0)), b"\x1b[>0;10;1c".to_vec());
+        assert_eq!(r.scan(b"\x1b[5n", (0, 0)), b"\x1b[0n".to_vec());
+        assert_eq!(r.scan(b"\x1b[?u", (0, 0)), b"\x1b[?0u".to_vec());
+        assert_eq!(r.scan(b"\x1b[>0q", (0, 0)), b"\x1bP>|agnt\x1b\\".to_vec());
+        // A terminfo capability query is refused rather than ignored, which
+        // is an answer the asker knows what to do with.
+        assert_eq!(
+            r.scan(b"\x1bP+q696e646e\x1b\\", (0, 0)),
+            b"\x1bP0+r\x1b\\".to_vec()
+        );
+    }
+
+    /// A cursor position report describes the screen the shell is about to
+    /// draw on, and is one-based where the emulator is zero-based.
+    #[test]
+    fn a_cursor_position_report_gives_the_position() {
+        let mut r = QueryResponder::default();
+        assert_eq!(r.scan(b"\x1b[6n", (4, 11)), b"\x1b[5;12R".to_vec());
+    }
+
+    /// Output arrives in whatever sized pieces the pty hands over, so a query
+    /// can be split across two reads. Holding the tail is what makes the
+    /// answer arrive at all.
+    #[test]
+    fn a_query_split_across_two_reads_is_still_answered() {
+        let mut r = QueryResponder::default();
+        assert!(r.scan(b"hello\x1b[", (0, 0)).is_empty());
+        assert_eq!(r.scan(b"0c", (0, 0)), b"\x1b[?1;2c".to_vec());
+
+        // And across three, with the escape alone at the end of one.
+        let mut r = QueryResponder::default();
+        assert!(r.scan(b"\x1b", (0, 0)).is_empty());
+        assert!(r.scan(b"[", (0, 0)).is_empty());
+        assert_eq!(r.scan(b"c", (0, 0)), b"\x1b[?1;2c".to_vec());
+    }
+
+    /// Ordinary output must not be mistaken for a question, and sequences
+    /// that are not questions must not throw the scan off the ones that are.
+    #[test]
+    fn ordinary_output_is_not_mistaken_for_a_question() {
+        let mut r = QueryResponder::default();
+        assert!(r.scan(b"just some text\r\n", (0, 0)).is_empty());
+        // Colour, alternate screen, a title, a two-byte escape: all skipped.
+        assert!(
+            r.scan(b"\x1b[0m\x1b[?1049h\x1b]0;a title\x07\x1bM\x1b[1;5H", (0, 0))
+                .is_empty()
+        );
+        // Still finds a real query after all of that.
+        assert_eq!(
+            r.scan(b"\x1b[38;2;1;2;3mcoloured\x1b[0m\x1b[0c", (0, 0)),
+            b"\x1b[?1;2c".to_vec()
+        );
+    }
+
+    /// A stray escape in the middle of output must not make the scanner hold
+    /// bytes for ever waiting for a sequence that is never coming.
+    ///
+    /// The bytes here are digits, which are CSI *parameters*: they keep the
+    /// sequence open, which is what a run of ordinary letters would not do —
+    /// a letter is a final byte and ends it on the spot.
+    #[test]
+    fn a_stray_escape_does_not_grow_without_bound() {
+        let mut r = QueryResponder::default();
+        r.scan(b"\x1b[", (0, 0));
+        assert_eq!(r.pending.len(), 2);
+
+        r.scan(&vec![b'1'; MAX_PENDING / 2], (0, 0));
+        assert!(!r.pending.is_empty(), "a real long sequence must be held");
+
+        r.scan(&vec![b'1'; MAX_PENDING * 2], (0, 0));
+        assert!(r.pending.is_empty(), "{} bytes held", r.pending.len());
+
+        // And it recovers: the next real query is still answered.
+        assert_eq!(r.scan(b"\x1b[0c", (0, 0)), b"\x1b[?1;2c".to_vec());
+    }
+
+    /// End to end: a real program on a real pty asks what the terminal is,
+    /// and the answer comes back to it.
+    ///
+    /// The reply is written to the pty's input, where the tty driver echoes
+    /// it — which is how it becomes visible on the screen agnt draws, and how
+    /// this test can see that it was sent at all.
+    #[tokio::test]
+    async fn a_program_that_asks_what_the_terminal_is_gets_an_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut shell = match PtyShell::spawn(Path::new("/bin/sh"), dir.path(), 24, 80, || {}) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("no pty available here ({e}); skipping");
+                return;
+            }
+        };
+
+        let screen = |s: &PtyShell| {
+            s.parser()
+                .lock()
+                .map(|p| p.screen().contents())
+                .unwrap_or_default()
+        };
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !screen(&shell).trim().is_empty() {
+                break;
+            }
+        }
+
+        shell.send(b"printf '\\033[0c'\r");
+        let mut answered = false;
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // The parameters of the reply, whatever the echo does with the
+            // escape byte in front of them.
+            if screen(&shell).contains("[?1;2c") {
+                answered = true;
+                break;
+            }
+        }
+        assert!(
+            answered,
+            "the device attributes query went unanswered; screen was:\n{}",
+            screen(&shell)
         );
     }
 
