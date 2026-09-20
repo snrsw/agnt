@@ -375,11 +375,11 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
         _ => println!(),
     }
 
-    match crate::ui::PromptStyle::current() {
-        crate::ui::PromptStyle::Bubbles => {
-            println!("prompt: bubbles (needs a Nerd Font; AGNT_PROMPT=plain for none)")
+    match crate::ui::Skin::current() {
+        crate::ui::Skin::Bubbles => {
+            println!("style: bubbles (needs a Nerd Font; AGNT_STYLE=plain for none)")
         }
-        crate::ui::PromptStyle::Plain => println!("prompt: plain (AGNT_PROMPT=plain)"),
+        crate::ui::Skin::Plain => println!("style: plain"),
     }
 
     match CacheStore::new(paths).load() {

@@ -25,7 +25,7 @@ use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, 
 ///
 /// The prompt's bubbles are the one exception and carry `bubblesextra`'s own
 /// hex colours, because the point of quoting a named theme is to look like
-/// it. See [`PromptStyle`].
+/// it. See [`Skin`].
 mod theme {
     use ratatui::style::{Color, Modifier, Style};
 
@@ -119,7 +119,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         // two of them wrap to together, plus one cell for the cursor.
         let width = (area.width as usize).saturating_sub(MARGIN as usize * 2).max(1);
         let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-        let prefix = prompt_prefix(app, width, PromptStyle::current());
+        let prefix = prompt_prefix(app, width, Skin::current());
         let used = spans_width(&prefix) + app.draft.buffer.width() + 1;
         1 + used.div_ceil(width).clamp(1, grow_cap) as u16 + 1
     };
@@ -243,7 +243,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// How the prompt is drawn.
+/// How agnt draws the things it puts in pills: the prompt, and each row's
+/// second line.
 ///
 /// `Bubbles` follows oh-my-posh's `bubblesextra`: each piece of context is a
 /// rounded pill, which is what the author of this tool has in their own
@@ -253,21 +254,21 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// puts every column after them out by one.
 ///
 /// That cannot be detected from inside a terminal, so it is a choice rather
-/// than a guess: `AGNT_PROMPT=plain` gets the same prompt without the glyphs
+/// than a guess: `AGNT_STYLE=plain` gets the same prompt without the glyphs
 /// or the colours.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PromptStyle {
+pub enum Skin {
     #[default]
     Bubbles,
     Plain,
 }
 
-impl PromptStyle {
+impl Skin {
     /// Read once: it cannot change while the program runs, and the prompt is
     /// rebuilt on every frame.
     pub fn current() -> Self {
-        static CHOICE: std::sync::OnceLock<PromptStyle> = std::sync::OnceLock::new();
-        *CHOICE.get_or_init(|| match std::env::var("AGNT_PROMPT").as_deref() {
+        static CHOICE: std::sync::OnceLock<Skin> = std::sync::OnceLock::new();
+        *CHOICE.get_or_init(|| match std::env::var("AGNT_STYLE").as_deref() {
             Ok("plain") => Self::Plain,
             _ => Self::Bubbles,
         })
@@ -296,6 +297,33 @@ mod bubbles {
     /// The blue it gives a language segment, `#7FD5EA`, for the agent.
     pub const AGENT: Color = Color::Rgb(0x7f, 0xd5, 0xea);
 
+    /// The grey it gives an execution time, `#AEA4BF`, for an age and for
+    /// anything with no colour of its own.
+    pub const MUTED: Color = Color::Rgb(0xae, 0xa4, 0xbf);
+    /// Its amber, `#E4F34A`, for a session that wants an answer.
+    pub const WAITING: Color = Color::Rgb(0xe4, 0xf3, 0x4a);
+    /// Its green, `#42E66C`, for one that is working.
+    pub const RUNNING: Color = Color::Rgb(0x42, 0xe6, 0x6c);
+    /// Its red, `#E64747`, for one that has failed.
+    pub const ERROR: Color = Color::Rgb(0xe6, 0x47, 0x47);
+
+    /// A state's colour on the fill.
+    ///
+    /// Every pill needs an explicit foreground. The fill is a fixed dark
+    /// navy, so a state that leaves the foreground to the terminal — which
+    /// is what an idle session does elsewhere in the list — would be drawn
+    /// in the terminal's own text colour, and on a light theme that is dark
+    /// text on a dark pill.
+    pub fn state(s: crate::model::RuntimeState) -> Color {
+        use crate::model::RuntimeState as R;
+        match s {
+            R::WaitingApproval | R::WaitingInput => WAITING,
+            R::Running | R::Starting => RUNNING,
+            R::Error => ERROR,
+            _ => MUTED,
+        }
+    }
+
     /// Two caps and a space either side of the content.
     pub const OVERHEAD: usize = 2;
 }
@@ -316,7 +344,7 @@ fn bubble(content: String, fg: ratatui::style::Color) -> Vec<Span<'static>> {
 /// down to answer "where is this going?" while typing across. They are the
 /// subject of the sentence the user is writing, so they belong in front of
 /// it, the way a shell puts the directory in front of the command.
-fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'static>> {
+fn prompt_prefix(app: &App, width: usize, style: Skin) -> Vec<Span<'static>> {
     let provider = app.draft.provider;
 
     // At most a third of the line, so there is always room to type. The
@@ -324,7 +352,7 @@ fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'stati
     let room = (width / 3).min(40);
 
     match style {
-        PromptStyle::Plain => vec![
+        Skin::Plain => vec![
             Span::styled(
                 format!("{} {}", provider.icon(), provider.label()),
                 theme::accent(),
@@ -334,7 +362,7 @@ fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'stati
                 theme::muted(),
             ),
         ],
-        PromptStyle::Bubbles => {
+        Skin::Bubbles => {
             let path = short_path_within(&app.new_session_cwd(), room.saturating_sub(bubbles::OVERHEAD + 2));
             let mut spans = bubble(
                 format!(" {} {} ", provider.icon(), provider.label()),
@@ -363,7 +391,7 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
         .border_style(theme::rule());
     let area = with_margin(block.inner(outer));
 
-    let mut spans = prompt_prefix(app, area.width as usize, PromptStyle::current());
+    let mut spans = prompt_prefix(app, area.width as usize, Skin::current());
     if app.draft.buffer.is_empty() {
         spans.push(Span::styled("Describe a task for a new session", theme::muted()));
     } else {
@@ -488,6 +516,7 @@ fn card_lines(
     now: DateTime<Utc>,
     selected: bool,
     suffix: &str,
+    skin: Skin,
 ) -> Vec<Line<'static>> {
     let links = links_text(v);
     let links_w = if links.is_empty() { 0 } else { links.width() + 2 };
@@ -524,32 +553,71 @@ fn card_lines(
         first.push(Span::styled(links, theme::link()));
     }
 
-    // Second line: agent, state in words, where, and how long ago.
-    let mut meta = vec![v.session.provider().label().to_string(), v.state_label()];
+    // Always two lines. The selected row changes colour, never height: a row
+    // that grew under the cursor pushed every row below it as the cursor
+    // moved, and the list looked as though it was shuffling.
+    vec![Line::from(first), meta_line(v, width, now, selected, skin)]
+}
+
+/// A card's second line: agent, state in words, where, and how long ago.
+///
+/// In the bubbles skin these are pills, the same four-piece sentence the
+/// prompt makes of the agent and the directory, so a row and the prompt read
+/// as the same design rather than two.
+fn meta_line(v: &SessionView, width: usize, now: DateTime<Utc>, selected: bool, skin: Skin) -> Line<'static> {
     let mut place = v.repo();
     if let Some(b) = v.branch_or_worktree() {
         place.push_str(&format!(" / {b}"));
     }
-    meta.push(place);
-    if let Some(age) = v.age(now) {
-        meta.push(age);
-    }
-    let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
+    let age = v.age(now);
 
-    // The selected card's second line keeps full contrast so it reads as
-    // part of the row the cursor is on.
-    let meta_style = if selected {
-        Style::default()
-    } else {
-        theme::muted()
-    };
-    // Always two lines. The selected row changes colour, never height: a row
-    // that grew under the cursor pushed every row below it as the cursor
-    // moved, and the list looked as though it was shuffling.
-    vec![
-        Line::from(first),
-        Line::styled(text::truncate_to_width(&second, width), meta_style),
-    ]
+    if skin == Skin::Plain {
+        let mut meta = vec![v.session.provider().label().to_string(), v.state_label()];
+        meta.push(place);
+        meta.extend(age);
+        let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
+        // The selected card's second line keeps full contrast so it reads as
+        // part of the row the cursor is on.
+        let style = if selected {
+            Style::default()
+        } else {
+            theme::muted()
+        };
+        return Line::styled(text::truncate_to_width(&second, width), style);
+    }
+
+    // The fixed pieces first, so what is left is what the place may have.
+    let agent = format!(
+        " {} {} ",
+        v.session.provider().icon(),
+        v.session.provider().label()
+    );
+    let state = format!(" {} ", v.state_label());
+    let age_pill = age.map(|a| format!(" {a} "));
+    let fixed = W_GLYPH
+        + agent.width()
+        + state.width()
+        + age_pill
+            .as_deref()
+            .map_or(0, |a| a.width() + bubbles::OVERHEAD + 1)
+        + bubbles::OVERHEAD * 3
+        + 2;
+    let room = width.saturating_sub(fixed).saturating_sub(3).max(4);
+
+    let mut spans = vec![Span::raw(" ".repeat(W_GLYPH))];
+    spans.extend(bubble(agent, bubbles::AGENT));
+    spans.push(Span::raw(" "));
+    spans.extend(bubble(state, bubbles::state(v.state())));
+    spans.push(Span::raw(" "));
+    spans.extend(bubble(
+        format!(" {} {} ", bubbles::FOLDER, text::truncate_to_width(&place, room)),
+        bubbles::PATH,
+    ));
+    if let Some(a) = age_pill {
+        spans.push(Span::raw(" "));
+        spans.extend(bubble(a, bubbles::MUTED));
+    }
+    Line::from(spans)
 }
 
 /// A session as one line under a repository heading. The repository is already
@@ -723,7 +791,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                     style = style.add_modifier(Modifier::DIM);
                 }
                 let lines = if app.view.is_cards() {
-                    card_lines(v, total, now, selected, &suffix)
+                    card_lines(v, total, now, selected, &suffix, Skin::current())
                 } else {
                     vec![compact_line(v, total, now, &suffix)]
                 };
@@ -1081,8 +1149,53 @@ mod tests {
         assert!(has(&out, "Fix the auth handler"), "{out}");
         assert!(has(&out, "PR #123"), "{out}");
         // The second line qualifies the first: agent, state in words, place.
-        assert!(has(&out, "Claude · Needs approval · api"), "{out}");
+        for needle in ["Claude", "Needs approval", "api"] {
+            assert!(has(&out, needle), "{needle} missing in\n{out}");
+        }
         assert!(has(&out, "Idle 1"), "{out}");
+    }
+
+    /// A row's second line is the same four-piece sentence the prompt makes
+    /// of the agent and the directory, drawn the same way, so a row and the
+    /// prompt read as one design rather than two.
+    #[test]
+    fn a_rows_second_line_is_bubbles_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![session(
+                "a",
+                "Fix the auth handler",
+                RuntimeState::WaitingApproval,
+            )],
+        );
+        let v = app.rows().iter().find_map(|r| match r {
+            ListRow::Session(v) => Some(v.clone()),
+            _ => None,
+        });
+        let v = v.expect("a session row");
+
+        let line = meta_line(&v, 120, chrono::Utc::now(), false, Skin::Bubbles);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text.matches(bubbles::LEFT).count(), 3, "{text:?}");
+        assert!(text.contains(bubbles::FOLDER), "{text:?}");
+        assert!(text.contains("Claude") && text.contains("Needs approval"));
+
+        // Every pill carries an explicit foreground. The fill is a fixed dark
+        // navy, so a state that left the colour to the terminal would be the
+        // terminal's own text colour — dark on dark, on a light theme.
+        for span in line.spans.iter().filter(|s| s.style.bg == Some(bubbles::FILL)) {
+            assert!(span.style.fg.is_some(), "unfilled foreground: {span:?}");
+        }
+
+        // The plain skin keeps the separated form, and no glyphs.
+        let plain = meta_line(&v, 120, chrono::Utc::now(), false, Skin::Plain);
+        let text: String = plain.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("Claude · Needs approval · api"), "{text:?}");
+        assert!(
+            !text.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -1234,7 +1347,7 @@ mod tests {
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
 
-        let spans = prompt_prefix(&app, 100, PromptStyle::Bubbles);
+        let spans = prompt_prefix(&app, 100, Skin::Bubbles);
         let line: String = spans.iter().map(|s| s.content.as_ref()).collect();
 
         // Two pills, so two of each cap, and the folder mark in the second.
@@ -1267,7 +1380,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.draft.provider = Provider::Codex;
-        for style in [PromptStyle::Bubbles, PromptStyle::Plain] {
+        for style in [Skin::Bubbles, Skin::Plain] {
             let spans = prompt_prefix(&app, 100, style);
             for span in &spans {
                 for c in span.content.chars() {
@@ -1291,7 +1404,7 @@ mod tests {
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
 
-        let spans = prompt_prefix(&app, 100, PromptStyle::Plain);
+        let spans = prompt_prefix(&app, 100, Skin::Plain);
         let line: String = spans.iter().map(|s| s.content.as_ref()).collect();
         for glyph in [bubbles::LEFT, bubbles::RIGHT, bubbles::FOLDER] {
             assert!(!line.contains(glyph), "{line:?}");

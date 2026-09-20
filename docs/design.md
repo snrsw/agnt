@@ -108,7 +108,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
 
-**The prompt is the one place that departs from this**, and does so deliberately: its bubbles carry `bubblesextra`'s own hex colours. The rule exists so the list wears the terminal's theme rather than fighting it, which is the right default for fifty rows of status. The prompt is one line, it is quoting a named theme, and the point of quoting it is to look like that theme. `AGNT_PROMPT=plain` returns it to the rule.
+**The bubbles are the one place that departs from this**, and do so deliberately: they carry `bubblesextra`'s own hex colours. Once the fill is a fixed dark navy the foregrounds have to be fixed too — a state that left its colour to the terminal, which is what an idle session does elsewhere, would be drawn in the terminal's own text colour, and on a light theme that is dark text on a dark pill. So the pills carry the theme's palette throughout, including a colour per state. `AGNT_STYLE=plain` returns everything to the rule.
 
 **Spacing.** Every heading but the first has a blank line above it, and every heading with rows under it has one below, so a heading reads as a heading rather than as the first row of its group. The header, the prompt and the footer share a two-cell left margin — the width of the list's cursor gutter — so their text lines up with the rows' glyphs and nothing sits flush against the terminal's edge.
 
@@ -116,9 +116,9 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 ```
 > ● claude-code-action auth subscription                      issue #880
-    Claude · Needs input · reed · 34d
+     ◆ Claude   Needs input   󰉋 reed   34d
   ○ review pr #985
-    Claude · Idle · reed · 1h
+     ◆ Claude   Idle   󰉋 reed   1h 
 ──────────────────────────────────────────────────────────────────────────
   ◆ Claude    ~/src/reed  Describe a task for a new session
 ──────────────────────────────────────────────────────────────────────────
@@ -153,9 +153,11 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 
 There is no caret. A `>` earns its place on a bare prompt by marking where the typing starts; a pill has a rounded edge that does the same job, so a caret after one is a second marker for a boundary already drawn. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
 
+**The same bubbles carry a row's second line**, so a row and the prompt read as one design rather than two: the agent, the state in words, where it is, and how long ago — the same four-piece sentence, in pills. The title line above it is untouched, because a pill around a title would box in the one thing that should read as plain text. The repository view is left alone as well: it is a table, its columns are what make it scannable, and pills do not tabulate.
+
 **The bubbles are oh-my-posh's `bubblesextra`.** A rounded cap, the content on a fill, a rounded cap: `\ue0b6` and `\ue0b4` drawn in the fill colour against the terminal's own background, which is what makes a rectangle of background read as a pill. The palette is the theme's — `#29315A` fill, `#3EC669` for the path with its `\ue5ff` folder mark, and `#7FD5EA` for the agent. The reason to quote a prompt theme is that a user running it in their shell sees the same machine in both places; this project's author does.
 
-**It needs a Nerd Font, and that cannot be detected from inside a terminal.** Without one the caps come out as blank boxes, or worse as glyphs the terminal gives a different advance width — which puts every column after them out by one, a failure this project has already had once with a different glyph. So it is a choice rather than a guess: `AGNT_PROMPT=plain` gives the same prompt with the same words, in named ANSI colours and no private-use characters. A test asserts that every glyph in either prompt is one cell wide, and another that the plain one contains no private-use characters at all.
+**It needs a Nerd Font, and that cannot be detected from inside a terminal.** Without one the caps come out as blank boxes, or worse as glyphs the terminal gives a different advance width — which puts every column after them out by one, a failure this project has already had once with a different glyph. So it is a choice rather than a guess: `AGNT_STYLE=plain` gives the same prompt with the same words, in named ANSI colours and no private-use characters. A test asserts that every glyph in either prompt is one cell wide, and another that the plain one contains no private-use characters at all.
 
 **Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
 
