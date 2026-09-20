@@ -375,6 +375,13 @@ async fn doctor(paths: &Paths) -> anyhow::Result<ExitCode> {
         _ => println!(),
     }
 
+    match crate::ui::PromptStyle::current() {
+        crate::ui::PromptStyle::Bubbles => {
+            println!("prompt: bubbles (needs a Nerd Font; AGNT_PROMPT=plain for none)")
+        }
+        crate::ui::PromptStyle::Plain => println!("prompt: plain (AGNT_PROMPT=plain)"),
+    }
+
     match CacheStore::new(paths).load() {
         Some(c) => println!(
             "cache: {} rows, saved {}",

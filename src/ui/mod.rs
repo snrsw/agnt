@@ -22,6 +22,10 @@ use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, 
 /// Colour is additive everywhere it appears. A state always has its glyph and
 /// its word as well (design.md §3), so a monochrome terminal loses nothing but
 /// the emphasis.
+///
+/// The prompt's bubbles are the one exception and carry `bubblesextra`'s own
+/// hex colours, because the point of quoting a named theme is to look like
+/// it. See [`PromptStyle`].
 mod theme {
     use ratatui::style::{Color, Modifier, Style};
 
@@ -115,7 +119,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         // two of them wrap to together, plus one cell for the cursor.
         let width = (area.width as usize).saturating_sub(MARGIN as usize * 2).max(1);
         let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-        let used = spans_width(&prompt_prefix(app, width)) + app.draft.buffer.width() + 1;
+        let prefix = prompt_prefix(app, width, PromptStyle::current());
+        let used = spans_width(&prefix) + app.draft.buffer.width() + 1;
         1 + used.div_ceil(width).clamp(1, grow_cap) as u16 + 1
     };
 
@@ -243,6 +248,74 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 /// find where the typing starts.
 const CARET: &str = ">>> ";
 
+/// How the prompt is drawn.
+///
+/// `Bubbles` follows oh-my-posh's `bubblesextra`: each piece of context is a
+/// rounded pill, which is what the author of this tool has in their own
+/// shell, so the two prompts look like the same machine. It needs a Nerd Font
+/// for the caps and the folder mark; without one they come out as blank boxes
+/// or, worse, as glyphs the terminal gives a different advance width, which
+/// puts every column after them out by one.
+///
+/// That cannot be detected from inside a terminal, so it is a choice rather
+/// than a guess: `AGNT_PROMPT=plain` gets the same prompt without the glyphs
+/// or the colours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PromptStyle {
+    #[default]
+    Bubbles,
+    Plain,
+}
+
+impl PromptStyle {
+    /// Read once: it cannot change while the program runs, and the prompt is
+    /// rebuilt on every frame.
+    pub fn current() -> Self {
+        static CHOICE: std::sync::OnceLock<PromptStyle> = std::sync::OnceLock::new();
+        *CHOICE.get_or_init(|| match std::env::var("AGNT_PROMPT").as_deref() {
+            Ok("plain") => Self::Plain,
+            _ => Self::Bubbles,
+        })
+    }
+}
+
+/// `bubblesextra`, as far as a prompt with two things to say needs it.
+///
+/// The caps are drawn in the fill colour against the terminal's own
+/// background, which is what makes a rectangle of background colour read as a
+/// rounded pill. The palette is the theme's: one fill for every bubble, and a
+/// colour per segment on top of it.
+mod bubbles {
+    use ratatui::style::Color;
+
+    /// Rounded left and right caps, and the folder mark the theme's path
+    /// segment uses. All three are Nerd Font glyphs.
+    pub const LEFT: &str = "\u{e0b6}";
+    pub const RIGHT: &str = "\u{e0b4}";
+    pub const FOLDER: &str = "\u{e5ff}";
+
+    /// The one fill every bubble shares, `#29315A`.
+    pub const FILL: Color = Color::Rgb(0x29, 0x31, 0x5a);
+    /// The theme's path green, `#3EC669`.
+    pub const PATH: Color = Color::Rgb(0x3e, 0xc6, 0x69);
+    /// The blue it gives a language segment, `#7FD5EA`, for the agent.
+    pub const AGENT: Color = Color::Rgb(0x7f, 0xd5, 0xea);
+    /// The red on its own prompt marker, `#E64747`.
+    pub const CARET: Color = Color::Rgb(0xe6, 0x47, 0x47);
+
+    /// Two caps and a space either side of the content.
+    pub const OVERHEAD: usize = 2;
+}
+
+/// One pill: a cap, the content on the fill, and a cap.
+fn bubble(content: String, fg: ratatui::style::Color) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(bubbles::LEFT, Style::default().fg(bubbles::FILL)),
+        Span::styled(content, Style::default().fg(fg).bg(bubbles::FILL)),
+        Span::styled(bubbles::RIGHT, Style::default().fg(bubbles::FILL)),
+    ]
+}
+
 /// What the prompt says before the cursor: which agent will take the task,
 /// and where it will run.
 ///
@@ -250,29 +323,55 @@ const CARET: &str = ">>> ";
 /// down to answer "where is this going?" while typing across. They are the
 /// subject of the sentence the user is writing, so they belong in front of
 /// it, the way a shell puts the directory in front of the command.
-fn prompt_prefix(app: &App, width: usize) -> Vec<Span<'static>> {
+fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'static>> {
     let provider = app.draft.provider;
+    let active = !app.draft.buffer.trim().is_empty();
+
     // At most a third of the line, so there is always room to type. The
     // agent and the caret are short and fixed; the path is the part that
     // has to give.
     let room = (width / 3).min(40);
-    let active = !app.draft.buffer.trim().is_empty();
-    let caret = if active {
-        theme::accent().add_modifier(Modifier::BOLD)
-    } else {
-        theme::muted()
-    };
-    vec![
-        Span::styled(
-            format!("{} {}", provider.icon(), provider.label()),
-            theme::accent(),
-        ),
-        Span::styled(
-            format!("  {}  ", short_path_within(&app.new_session_cwd(), room)),
-            theme::muted(),
-        ),
-        Span::styled(CARET, caret),
-    ]
+
+    match style {
+        PromptStyle::Plain => {
+            let caret = if active {
+                theme::accent().add_modifier(Modifier::BOLD)
+            } else {
+                theme::muted()
+            };
+            vec![
+                Span::styled(
+                    format!("{} {}", provider.icon(), provider.label()),
+                    theme::accent(),
+                ),
+                Span::styled(
+                    format!("  {}  ", short_path_within(&app.new_session_cwd(), room)),
+                    theme::muted(),
+                ),
+                Span::styled(CARET, caret),
+            ]
+        }
+        PromptStyle::Bubbles => {
+            let path = short_path_within(&app.new_session_cwd(), room.saturating_sub(bubbles::OVERHEAD + 2));
+            let mut spans = bubble(
+                format!(" {} {} ", provider.icon(), provider.label()),
+                bubbles::AGENT,
+            );
+            spans.push(Span::raw(" "));
+            spans.extend(bubble(format!(" {} {} ", bubbles::FOLDER, path), bubbles::PATH));
+            spans.push(Span::raw(" "));
+            let caret = Style::default().fg(bubbles::CARET);
+            spans.push(Span::styled(
+                CARET,
+                if active {
+                    caret.add_modifier(Modifier::BOLD)
+                } else {
+                    caret.add_modifier(Modifier::DIM)
+                },
+            ));
+            spans
+        }
+    }
 }
 
 fn spans_width(spans: &[Span]) -> usize {
@@ -287,7 +386,7 @@ fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
         .border_style(theme::rule());
     let area = with_margin(block.inner(outer));
 
-    let mut spans = prompt_prefix(app, area.width as usize);
+    let mut spans = prompt_prefix(app, area.width as usize, PromptStyle::current());
     if app.draft.buffer.is_empty() {
         spans.push(Span::styled("Describe a task for a new session", theme::muted()));
     } else {
@@ -1142,6 +1241,87 @@ mod tests {
             let rule: &str = out.lines().nth(offset).unwrap();
             assert!(rule.chars().all(|c| c == '\u{2500}'), "{rule:?}\n{out}");
         }
+    }
+
+    /// The bubbles are `bubblesextra`'s: a rounded cap, the content on the
+    /// fill, a rounded cap, one pill per thing the prompt has to say.
+    #[test]
+    fn the_prompt_is_drawn_as_bubbles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
+
+        let spans = prompt_prefix(&app, 100, PromptStyle::Bubbles);
+        let line: String = spans.iter().map(|s| s.content.as_ref()).collect();
+
+        // Two pills, so two of each cap, and the folder mark in the second.
+        assert_eq!(line.matches(bubbles::LEFT).count(), 2, "{line:?}");
+        assert_eq!(line.matches(bubbles::RIGHT).count(), 2, "{line:?}");
+        assert!(line.contains(bubbles::FOLDER), "{line:?}");
+        assert!(line.contains("Claude") && line.contains("/tmp/some/checkout"));
+
+        // The caps are the fill colour against the terminal's own background,
+        // which is what makes the fill read as a rounded pill rather than a
+        // rectangle. Getting this wrong is invisible in a text dump.
+        let caps: Vec<&Span> = spans
+            .iter()
+            .filter(|s| s.content == bubbles::LEFT || s.content == bubbles::RIGHT)
+            .collect();
+        assert_eq!(caps.len(), 4);
+        for cap in caps {
+            assert_eq!(cap.style.fg, Some(bubbles::FILL), "{cap:?}");
+            assert_eq!(cap.style.bg, None, "a cap must not be filled: {cap:?}");
+        }
+        // And the content between them is.
+        let filled = spans.iter().filter(|s| s.style.bg == Some(bubbles::FILL));
+        assert_eq!(filled.count(), 2);
+    }
+
+    /// Every glyph in the prompt is one cell wide, or every column after it
+    /// is out by one. This caught a bad glyph choice once already.
+    #[test]
+    fn every_prompt_glyph_is_one_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.draft.provider = Provider::Codex;
+        for style in [PromptStyle::Bubbles, PromptStyle::Plain] {
+            let spans = prompt_prefix(&app, 100, style);
+            for span in &spans {
+                for c in span.content.chars() {
+                    assert_eq!(
+                        unicode_width::UnicodeWidthChar::width(c),
+                        Some(1),
+                        "U+{:04X} in {style:?} is not one cell",
+                        c as u32
+                    );
+                }
+            }
+        }
+    }
+
+    /// A terminal without a Nerd Font would draw the caps as blank boxes, and
+    /// that cannot be detected from in here — so it is a choice, and the
+    /// plain prompt has to keep working.
+    #[test]
+    fn the_plain_prompt_has_no_nerd_font_glyphs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
+
+        let spans = prompt_prefix(&app, 100, PromptStyle::Plain);
+        let line: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        for glyph in [bubbles::LEFT, bubbles::RIGHT, bubbles::FOLDER] {
+            assert!(!line.contains(glyph), "{line:?}");
+        }
+        // No private-use characters of any kind, and nothing filled.
+        assert!(
+            !line.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+            "{line:?}"
+        );
+        assert!(spans.iter().all(|s| s.style.bg.is_none()));
+        // It still says the same things.
+        assert!(line.contains("Claude") && line.contains("/tmp/some/checkout"));
+        assert!(line.contains(">>>"));
     }
 
     /// A directory long enough to crowd out the task is shortened, keeping

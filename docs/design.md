@@ -108,6 +108,8 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
 
+**The prompt is the one place that departs from this**, and does so deliberately: its bubbles carry `bubblesextra`'s own hex colours. The rule exists so the list wears the terminal's theme rather than fighting it, which is the right default for fifty rows of status. The prompt is one line, it is quoting a named theme, and the point of quoting it is to look like that theme. `AGNT_PROMPT=plain` returns it to the rule.
+
 **Spacing.** Every heading but the first has a blank line above it, and every heading with rows under it has one below, so a heading reads as a heading rather than as the first row of its group. The header, the prompt and the footer share a two-cell left margin — the width of the list's cursor gutter — so their text lines up with the rows' glyphs and nothing sits flush against the terminal's edge.
 
 **Rows never change height. Only the cursor moves.** Every card is two lines and every compact row is one, whichever is selected. The selected session's remaining details — its shortened path, its classification when one is set, its short id, and a preview once a provider can supply one — sit on a single footer line that is always present, blank when nothing is selected:
@@ -118,7 +120,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
   ○ review pr #985
     Claude · Idle · reed · 1h
 ──────────────────────────────────────────────────────────────────────────
-◆ Claude  ~/src/reed  >>> Describe a task for a new session
+  ◆ Claude    ~/src/reed  >>> Describe a task for a new session
 ──────────────────────────────────────────────────────────────────────────
 …/GrassAI-Inc/reed · 5175105c
 type to start a session · enter to attach · ? for shortcuts
@@ -147,9 +149,13 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 | ? | The full key list, on an empty prompt |
 | Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
 
-**The prompt says where the task is going before it says anything else.** The agent that will take it, the directory it will start in, then the caret: `◆ Claude  ~/src/reed  >>>`. Both of the first two had a line of their own underneath the prompt, which meant reading down to answer "where is this going?" while typing across; they are the subject of the sentence being written, so they sit in front of it, the way a shell puts the directory in front of the command. That also gives the row back to the list, since the box is now a rule, one line, and a rule.
+**The prompt says where the task is going before it says anything else.** The agent that will take it and the directory it will start in, each in a bubble, then the caret. Both of the first two had a line of their own underneath the prompt, which meant reading down to answer "where is this going?" while typing across; they are the subject of the sentence being written, so they sit in front of it, the way a shell puts the directory in front of the command. That also gives the row back to the list, since the box is now a rule, one line, and a rule.
 
 The caret is three characters rather than one because what precedes it is a sentence, and the eye needs a hard edge to find where the typing starts. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
+
+**The bubbles are oh-my-posh's `bubblesextra`.** A rounded cap, the content on a fill, a rounded cap: `\ue0b6` and `\ue0b4` drawn in the fill colour against the terminal's own background, which is what makes a rectangle of background read as a pill. The palette is the theme's — `#29315A` fill, `#3EC669` for the path with its `\ue5ff` folder mark, `#7FD5EA` for the agent, `#E64747` for the caret. The reason to quote a prompt theme is that a user running it in their shell sees the same machine in both places; this project's author does.
+
+**It needs a Nerd Font, and that cannot be detected from inside a terminal.** Without one the caps come out as blank boxes, or worse as glyphs the terminal gives a different advance width — which puts every column after them out by one, a failure this project has already had once with a different glyph. So it is a choice rather than a guess: `AGNT_PROMPT=plain` gives the same prompt with the same words, in named ANSI colours and no private-use characters. A test asserts that every glyph in either prompt is one cell wide, and another that the plain one contains no private-use characters at all.
 
 **Typing goes to the prompt, so every action is a chord.** Starting work is the most frequent thing the list is for, and making it cost a key to open a field made it the one action with a toll. The cost is that no plain letter can be an action: they are all text. Ctrl+U and Ctrl+W stay with the text, since a field holding prose owes its user those. `Enter` is deliberately overloaded on whether the prompt holds anything — start the task, or open the row — one key doing the obvious thing in both states rather than two keys to remember.
 
