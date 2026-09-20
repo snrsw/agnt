@@ -315,26 +315,6 @@ mod bubbles {
     pub const OVERHEAD: usize = 2;
 }
 
-/// A pill with no fill: the caps alone, dim, around content the caller
-/// colours.
-///
-/// The filled pill is right once — the prompt is a single line, and it is
-/// where the user acts. A row's second line is not once: four of them, times
-/// every row on screen, and a light terminal becomes a field of dark blocks.
-/// So the list keeps the shape and drops the fill.
-///
-/// Dropping it also gives the colour rule back. A fixed fill forces a fixed
-/// foreground, which is why the filled version has to carry a hardcoded
-/// colour per state; against the terminal's own background a state can wear
-/// the terminal's own colour again, as it does everywhere else in the list.
-fn chip(content: String, style: Style) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(bubbles::LEFT, theme::muted()),
-        Span::styled(content, style),
-        Span::styled(bubbles::RIGHT, theme::muted()),
-    ]
-}
-
 /// One pill: a cap, the content on the fill, and a cap.
 fn bubble(content: String, fg: ratatui::style::Color) -> Vec<Span<'static>> {
     vec![
@@ -657,13 +637,13 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     } else {
         h.label.clone()
     };
-    let mut left = vec![Span::styled(label, group_style(h))];
-    if Skin::current() == Skin::Plain {
-        left.push(Span::styled(format!(" {}", h.count), theme::muted()));
-    } else {
-        left.push(Span::raw(" "));
-        left.extend(chip(format!(" {} ", h.count), theme::muted()));
-    }
+    // A bare number. It was a badge for a while: one edge drawn around one
+    // count is cheaper than the row badges were, but it is the same idea, and
+    // the prompt is the one place on the screen that wears that shape.
+    let mut left = vec![
+        Span::styled(label, group_style(h)),
+        Span::styled(format!(" {}", h.count), theme::muted()),
+    ];
 
     // The tally's glyphs each wear their state's colour, so a repository row
     // says at a glance whether anything in it needs you.
