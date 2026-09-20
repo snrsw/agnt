@@ -47,15 +47,27 @@ pub const SCROLLBACK: usize = 1000;
 /// No shell-specific syntax is generated any more, so this needs no knowledge
 /// of what the shell is — it only has to be something that runs on a terminal.
 pub fn program() -> PathBuf {
-    if let Some(explicit) = std::env::var_os("AGNT_SHELL").filter(|s| !s.is_empty()) {
-        return PathBuf::from(explicit);
-    }
-    login_shell()
-        .or_else(|| {
-            std::env::var_os("SHELL")
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
+    choose_shell(
+        std::env::var_os("AGNT_SHELL"),
+        login_shell(),
+        std::env::var_os("SHELL"),
+    )
+}
+
+/// The choice itself, given the three answers.
+///
+/// Separated from where the answers come from so a test can make the choice
+/// without rewriting the environment of the whole process — which is shared
+/// with every other test running beside it.
+fn choose_shell(
+    explicit: Option<std::ffi::OsString>,
+    login: Option<PathBuf>,
+    env: Option<std::ffi::OsString>,
+) -> PathBuf {
+    let named = |v: Option<std::ffi::OsString>| v.filter(|s| !s.is_empty()).map(PathBuf::from);
+    named(explicit)
+        .or(login)
+        .or_else(|| named(env))
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
@@ -112,12 +124,18 @@ impl QueryResponder {
     /// because a cursor position report has to describe the screen the shell
     /// will next draw on.
     pub fn scan(&mut self, chunk: &[u8], cursor: (u16, u16)) -> Vec<u8> {
-        let buf: Vec<u8> = if self.pending.is_empty() {
-            chunk.to_vec()
+        // Almost every read is plain output with no escape in it, and this
+        // runs on the thread draining the pty, so the common case copies
+        // nothing: the chunk is scanned where it lies. Only a sequence split
+        // across two reads needs the two joined.
+        let joined: Vec<u8>;
+        let buf: &[u8] = if self.pending.is_empty() {
+            chunk
         } else {
             let mut v = std::mem::take(&mut self.pending);
             v.extend_from_slice(chunk);
-            v
+            joined = v;
+            &joined
         };
 
         let mut out = Vec::new();
@@ -214,48 +232,56 @@ fn parse_sequence(s: &[u8]) -> Sequence {
             }
             Sequence::Incomplete
         }
-        // DCS, terminated by ST. The only one asked here is a terminfo
-        // capability query, which is answered with a refusal.
-        Some(b'P') => match find_st(s) {
+        // The string-terminated kinds: DCS, OSC, and the three — APC, PM,
+        // SOS — that carry no meaning here but end the same way. They are
+        // grouped rather than listed against a two-byte fallback, because a
+        // fallback that guessed the wrong length would resume the scan in
+        // the middle of a sequence and could answer something the shell
+        // never asked.
+        //
+        // Only one of them is a question: a terminfo capability query, which
+        // is answered with a refusal. The colour queries are deliberately
+        // left alone — the reply would have to invent a colour, and a shell
+        // themes itself from it, so a wrong answer is worse than none.
+        Some(b'P' | b']' | b'_' | b'^' | b'X') => match find_terminator(s) {
             Some(end) => Sequence::Complete {
                 len: end,
                 reply: s
                     .get(2..4)
-                    .filter(|head| *head == b"+q")
+                    .filter(|head| s[1] == b'P' && *head == b"+q")
                     .map(|_| Reply::NoCapability),
             },
             None => Sequence::Incomplete,
         },
-        // OSC, terminated by BEL or ST. Nothing here answers one: the colour
-        // queries would have to invent a colour, and a wrong answer is worse
-        // than none, since the shell themes itself from it.
-        Some(b']') => {
-            if let Some(bel) = s.iter().position(|b| *b == 0x07) {
-                return Sequence::Complete {
-                    len: bel + 1,
-                    reply: None,
-                };
-            }
-            match find_st(s) {
-                Some(end) => Sequence::Complete {
-                    len: end,
-                    reply: None,
-                },
-                None => Sequence::Incomplete,
-            }
-        }
-        // Two-byte escapes, and anything else: one byte of context is enough
-        // to know it is not a question.
+        // An escape with intermediate bytes before its final byte — a
+        // charset designation such as `ESC ( B` is the common one.
+        Some(0x20..=0x2f) => match s.iter().skip(1).position(|b| !(0x20..=0x2f).contains(b)) {
+            Some(at) => Sequence::Complete {
+                len: at + 2,
+                reply: None,
+            },
+            None => Sequence::Incomplete,
+        },
+        // Everything else is two bytes, and none of them is a question.
         Some(_) => Sequence::Complete { len: 2, reply: None },
     }
 }
 
 /// The end of a string-terminated sequence, as a length.
-fn find_st(s: &[u8]) -> Option<usize> {
-    s.windows(2)
-        .position(|w| w == b"\x1b\\")
-        .map(|at| at + 2)
-        .filter(|_| s.len() > 2)
+///
+/// One pass for whichever terminator arrives first: OSC may end with either
+/// a BEL or an ST, and looking for one and then the other walked the buffer
+/// twice to answer the same question.
+fn find_terminator(s: &[u8]) -> Option<usize> {
+    for (i, b) in s.iter().enumerate().skip(2) {
+        if *b == 0x07 {
+            return Some(i + 1);
+        }
+        if *b == b'\\' && s[i - 1] == 0x1b {
+            return Some(i + 1);
+        }
+    }
+    None
 }
 
 /// Which question a CSI sequence is asking, if it is asking one.
@@ -392,21 +418,31 @@ impl PtyShell {
         &self.program
     }
 
-    /// How many rows of the shell's screen have anything in them.
+    /// How many rows of the shell's screen have anything in them, and `0`
+    /// when it has not drawn yet.
     ///
     /// The text area is drawn this tall, so an idle shell is one line and a
     /// command's output grows the box to fit — the way the task prompt grows
     /// with the text typed into it. A terminal fills from the top, so this is
     /// the row the cursor is on, or the last row with content if a program
     /// has left the cursor above its own output.
-    pub fn used_rows(&self) -> u16 {
+    ///
+    /// Zero is a state the drawing cares about: a shell that has written
+    /// nothing is still starting, and says so instead of showing an empty
+    /// box. Answering both questions here means the screen's text is built
+    /// once per frame rather than once for the height and again for the
+    /// emptiness — `vt100` rebuilds it on every call.
+    pub fn drawn_rows(&self) -> u16 {
         let Ok(parser) = self.parser.lock() else {
-            return 1;
+            return 0;
         };
         let screen = parser.screen();
-        let (cursor_row, _) = screen.cursor_position();
         let written = screen.contents().lines().count() as u16;
-        cursor_row.saturating_add(1).max(written).max(1).min(self.size.0)
+        if written == 0 {
+            return 0;
+        }
+        let (cursor_row, _) = screen.cursor_position();
+        cursor_row.saturating_add(1).max(written).min(self.size.0)
     }
 
     /// The screen, for rendering. Held only as long as the draw takes.
@@ -578,18 +614,24 @@ mod tests {
         let os = login_shell().expect("the OS should know this user's shell");
         assert!(os.is_absolute(), "{os:?}");
 
-        // SAFETY: single-threaded test. `program()` is called nowhere else in
-        // the suite — every other test is handed its shell — so nothing races
-        // on this.
-        unsafe { std::env::set_var("AGNT_SHELL", "/bin/sh") };
-        assert_eq!(program(), PathBuf::from("/bin/sh"));
-        unsafe { std::env::remove_var("AGNT_SHELL") };
+        let some = |s: &str| Some(std::ffi::OsString::from(s));
+        let wrong = some("/definitely/not/the/users/shell");
 
-        // With no override, `$SHELL` loses to the OS. This is the `nix
-        // develop` case: it exports its own bash as `$SHELL`.
-        unsafe { std::env::set_var("SHELL", "/definitely/not/the/users/shell") };
-        assert_eq!(program(), os);
-        unsafe { std::env::remove_var("SHELL") };
+        // An explicit choice beats everything.
+        assert_eq!(
+            choose_shell(some("/bin/sh"), Some(os.clone()), wrong.clone()),
+            PathBuf::from("/bin/sh")
+        );
+        // With no override, `$SHELL` loses to the operating system. This is
+        // the `nix develop` case: it exports its own bash as `$SHELL`.
+        assert_eq!(choose_shell(None, Some(os.clone()), wrong.clone()), os);
+        // `$SHELL` is still better than nothing.
+        assert_eq!(
+            choose_shell(None, None, some("/bin/zsh")),
+            PathBuf::from("/bin/zsh")
+        );
+        // An empty variable is not an answer.
+        assert_eq!(choose_shell(some(""), None, None), PathBuf::from("/bin/sh"));
     }
 
     #[test]
@@ -696,6 +738,41 @@ mod tests {
             r.scan(b"\x1b[38;2;1;2;3mcoloured\x1b[0m\x1b[0c", (0, 0)),
             b"\x1b[?1;2c".to_vec()
         );
+    }
+
+    /// A sequence the scanner has no interest in still has to be measured
+    /// correctly, or the scan resumes inside it and answers something the
+    /// shell never asked.
+    #[test]
+    fn sequences_that_are_not_questions_are_still_framed() {
+        let mut r = QueryResponder::default();
+        // APC, PM and SOS end with ST like DCS and OSC do. Treating them as
+        // two bytes would leave their payload to be scanned as output.
+        for opener in [b'_', b'^', b'X'] {
+            let mut seq = vec![0x1b, opener];
+            seq.extend_from_slice(b"\x1b[0c pretending to be a query");
+            seq.extend_from_slice(b"\x1b\\");
+            assert!(
+                r.scan(&seq, (0, 0)).is_empty(),
+                "answered something inside a {opener} string"
+            );
+            // And the scanner is still in step afterwards.
+            assert_eq!(r.scan(b"\x1b[0c", (0, 0)), b"\x1b[?1;2c".to_vec());
+        }
+
+        // An escape with intermediate bytes: `ESC ( B`, a charset choice, is
+        // three bytes rather than two.
+        assert!(r.scan(b"\x1b(B", (0, 0)).is_empty());
+        assert_eq!(r.scan(b"\x1b[0c", (0, 0)), b"\x1b[?1;2c".to_vec());
+
+        // An OSC ending in BEL and one ending in ST are both found, and the
+        // query after either is answered.
+        for terminator in [b"\x07".as_slice(), b"\x1b\\".as_slice()] {
+            let mut seq = b"\x1b]0;a window title".to_vec();
+            seq.extend_from_slice(terminator);
+            seq.extend_from_slice(b"\x1b[0c");
+            assert_eq!(r.scan(&seq, (0, 0)), b"\x1b[?1;2c".to_vec());
+        }
     }
 
     /// A stray escape in the middle of output must not make the scanner hold

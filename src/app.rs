@@ -377,8 +377,8 @@ impl App {
 
     /// Counts for the header, in list order: how many need you, are working,
     /// and so on, with folded history last.
-    pub fn state_summary(&self) -> Vec<(Option<RuntimeState>, &'static str, usize)> {
-        let mut live: BTreeMap<u8, (Option<RuntimeState>, &'static str, usize)> = BTreeMap::new();
+    pub fn state_summary(&self) -> Vec<(Option<RuntimeState>, usize)> {
+        let mut live: BTreeMap<u8, (Option<RuntimeState>, usize)> = BTreeMap::new();
         let mut folded = 0usize;
         for v in self.views() {
             if !self.show_hidden && v.is_hidden() {
@@ -389,15 +389,14 @@ impl App {
                 continue;
             }
             let state = v.state();
-            let entry = live
-                .entry(state.sort_rank())
-                .or_insert((Some(state), state.short_label(), 0));
-            entry.2 += 1;
+            let entry = live.entry(state.sort_rank()).or_insert((Some(state), 0));
+            entry.1 += 1;
         }
-        let mut out: Vec<(Option<RuntimeState>, &'static str, usize)> = live.into_values().collect();
+        let mut out: Vec<(Option<RuntimeState>, usize)> = live.into_values().collect();
         if folded > 0 {
-            // Folded rows have no one state, so they get no glyph.
-            out.push((None, "in history", folded));
+            // Folded rows have no one state, so they get no glyph and no
+            // state's word — the caller supplies the one that fits.
+            out.push((None, folded));
         }
         out
     }
@@ -1809,9 +1808,9 @@ mod tests {
         assert_eq!(
             app.state_summary(),
             vec![
-                (Some(RuntimeState::WaitingApproval), "needs you", 1),
-                (Some(RuntimeState::Idle), "idle", 1),
-                (None, "in history", 1)
+                (Some(RuntimeState::WaitingApproval), 1),
+                (Some(RuntimeState::Idle), 1),
+                (None, 1)
             ]
         );
 
@@ -1819,9 +1818,9 @@ mod tests {
         assert_eq!(
             app.state_summary(),
             vec![
-                (Some(RuntimeState::WaitingApproval), "needs you", 1),
-                (Some(RuntimeState::Idle), "idle", 1),
-                (Some(RuntimeState::Stopped), "stopped", 1)
+                (Some(RuntimeState::WaitingApproval), 1),
+                (Some(RuntimeState::Idle), 1),
+                (Some(RuntimeState::Stopped), 1)
             ]
         );
     }

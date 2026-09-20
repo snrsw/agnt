@@ -107,21 +107,37 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // One box at the bottom either way, in the same place: agnt's prompt, or
     // the shell's. Switching modes changes what is in the text area, not
     // where it is or how the screen is divided.
+    // The inside of the bottom box, which both of the branches below measure
+    // against and which `draw_compose` then draws into.
+    let inner_w = area.width.saturating_sub(MARGIN * 2).max(1);
+
+    // How many rows of shell there are to show, and whether it has drawn
+    // anything yet. Read once: `vt100` rebuilds the screen's text on every
+    // call, and the draw path runs on every keystroke and every chunk of
+    // shell output.
+    let shell_rows = app.pty.as_ref().map(|p| p.drawn_rows());
+
+    // The prompt, built once. Measuring it with `line_count` asks the same
+    // wrapper that will draw it, so the box cannot come out a row short of
+    // what it holds — a hand-rolled estimate counted characters where
+    // ratatui breaks on words.
+    let prompt = (!shell_open).then(|| compose_prompt(app, inner_w as usize));
+
     let compose_h = if shell_open {
         // As tall as the shell is using, capped. An idle prompt is one line,
         // and a command's output grows the box to fit — the same way the task
         // prompt grows with the text typed into it.
-        let used = app.pty.as_ref().map_or(1, |p| p.used_rows());
+        let used = shell_rows.unwrap_or(0).max(1);
         1 + used.clamp(1, shell_rows_cap(area.height)) + 1
     } else {
         // The prompt grows with the task typed into it, up to a third of the
-        // screen. The prefix shares the first line, so the height is what the
-        // two of them wrap to together, plus one cell for the cursor.
-        let width = (area.width as usize).saturating_sub(MARGIN as usize * 2).max(1);
-        let grow_cap = ((area.height / 3).max(1) as usize).min(6);
-        let prefix = prompt_prefix(app, width, Skin::current());
-        let used = spans_width(&prefix) + app.draft.buffer.width() + 1;
-        1 + used.div_ceil(width).clamp(1, grow_cap) as u16 + 1
+        // screen.
+        let grow_cap = (area.height / 3).clamp(1, 6);
+        let used = prompt
+            .as_ref()
+            .map_or(1, |p| p.line_count(inner_w) as u16)
+            .clamp(1, grow_cap);
+        1 + used + 1
     };
 
     // Detail line, then any problems, then the key hint. The detail line is
@@ -143,9 +159,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_header(frame, header, app);
     draw_table(frame, body, app);
     if shell_open {
-        draw_shell(frame, compose, app);
-    } else {
-        draw_compose(frame, compose, app);
+        draw_shell(frame, compose, app, shell_rows.unwrap_or(0));
+    } else if let Some(prompt) = prompt {
+        draw_compose(frame, compose, prompt);
     }
     draw_status(frame, status, app);
     draw_dialog(frame, area, app);
@@ -159,7 +175,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// what makes this a text area — the user types into their own shell, with
 /// their own prompt, where agnt's prompt would otherwise be. The real cursor
 /// is placed on it so it blinks where they are typing.
-fn draw_shell(frame: &mut Frame, outer: Rect, app: &App) {
+fn draw_shell(frame: &mut Frame, outer: Rect, app: &App, drawn_rows: u16) {
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(theme::rule());
@@ -178,7 +194,7 @@ fn draw_shell(frame: &mut Frame, outer: Rect, app: &App) {
     // empty box looks broken rather than busy. How long this lasts is the
     // shell's own configuration — `direnv` sourcing a nix dev shell is
     // seconds — so it says which shell is being waited for.
-    if screen.contents().trim().is_empty() {
+    if drawn_rows == 0 {
         frame.render_widget(
             Paragraph::new(Line::styled(
                 text::truncate_to_width(
@@ -202,7 +218,7 @@ fn draw_shell(frame: &mut Frame, outer: Rect, app: &App) {
     }
 }
 
-/// Three lines and a gap, the shape the agent view uses:/// Three lines and a gap, the shape the agent view uses: what this is, where
+/// Three lines and a gap, the shape the agent view uses: what this is, where
 /// it is pointed, and what is in it.
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let area = with_margin(area);
@@ -212,14 +228,17 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     // the header speaks the language the list speaks rather than spelling it
     // out separately.
     let mut summary: Vec<Span<'static>> = Vec::new();
-    for (state, label, n) in app.state_summary() {
+    for (state, n) in app.state_summary() {
         if !summary.is_empty() {
             summary.push(Span::raw("   "));
         }
-        match state {
-            Some(s) => summary.push(Span::styled(state_glyph(s), state_style(s))),
-            None => summary.push(Span::styled("·", theme::muted())),
-        }
+        // A folded group has no one state, so it gets the neutral mark and
+        // the word that describes the folding rather than a state's own.
+        let (glyph, label) = match state {
+            Some(s) => (Span::styled(state_glyph(s), state_style(s)), s.short_label()),
+            None => (Span::styled("·", theme::muted()), "in history"),
+        };
+        summary.push(glyph);
         summary.push(Span::styled(format!(" {n} {label}"), theme::muted()));
     }
     if summary.is_empty() {
@@ -372,25 +391,27 @@ fn spans_width(spans: &[Span]) -> usize {
 
 /// The new-session prompt. It is always live — typing anywhere in the list
 /// lands here — so it is drawn as an active field rather than as a hint.
-fn draw_compose(frame: &mut Frame, outer: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(theme::rule());
-    let area = with_margin(block.inner(outer));
-
-    let mut spans = prompt_prefix(app, area.width as usize, Skin::current());
+fn compose_prompt(app: &App, width: usize) -> Paragraph<'static> {
+    let mut spans = prompt_prefix(app, width, Skin::current());
     if app.draft.buffer.is_empty() {
         spans.push(Span::styled("Describe a task for a new session", theme::muted()));
     } else {
         spans.push(Span::raw(app.draft.buffer.clone()));
         spans.push(Span::styled("_", theme::accent()));
     }
-
-    frame.render_widget(block, outer);
     // Wrapping puts continuation lines at the left margin rather than under
-    // the caret: a task long enough to wrap is easier to read on full-width
-    // lines than in a column the width of what is left after the prefix.
-    frame.render_widget(Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false }), area);
+    // the prefix: a task long enough to wrap is easier to read on full-width
+    // lines than in a column the width of what is left after it.
+    Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false })
+}
+
+fn draw_compose(frame: &mut Frame, outer: Rect, prompt: Paragraph<'static>) {
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(theme::rule());
+    let area = with_margin(block.inner(outer));
+    frame.render_widget(block, outer);
+    frame.render_widget(prompt, area);
 }
 
 /// A directory short enough to sit beside the prompt: `$HOME` becomes `~`,
@@ -648,7 +669,7 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     // The tally's glyphs each wear their state's colour, so a repository row
     // says at a glance whether anything in it needs you.
     if view != View::Repository {
-        let used: usize = left.iter().map(|s| s.content.width()).sum();
+        let used = spans_width(&left);
         left.push(rule_to(width, used));
         return Line::from(left);
     }
@@ -663,8 +684,8 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
         Span::styled("·", theme::muted()),
         Span::styled(format!(" {}", h.resting), theme::muted()),
     ];
-    let left_w: usize = left.iter().map(|s| s.content.width()).sum();
-    let tally_w: usize = tally.iter().map(|s| s.content.width()).sum();
+    let left_w = spans_width(&left);
+    let tally_w = spans_width(&tally);
 
     let mut spans = left;
     spans.push(rule_to(width, left_w + tally_w));
@@ -1465,6 +1486,52 @@ mod tests {
         assert!(line.contains("Claude") && line.contains("/tmp/some/checkout"));
         // And nothing stands between the directory and the task but a space.
         assert!(line.ends_with("  "), "{line:?}");
+    }
+
+    /// The box is sized by the wrapper that draws it.
+    ///
+    /// The height used to be estimated by packing characters into the width,
+    /// while ratatui breaks on word boundaries — so a task whose words fell
+    /// the wrong way was drawn into a box a row too short, and the line the
+    /// user was typing went missing.
+    #[test]
+    fn the_prompt_box_fits_what_it_wraps_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = std::path::PathBuf::from("/tmp/checkout");
+
+        // Two words too long to share a line with the prefix or with each
+        // other. Packing characters into the width says two rows; breaking on
+        // words needs three, because the prefix's line ends up mostly empty.
+        let (first, second) = ("a".repeat(35), "b".repeat(35));
+        app.draft.buffer = format!("{first} {second}");
+        let out = render(&app, 70, 24);
+
+        // Both survive: nothing was clipped off the bottom of the box.
+        assert!(out.contains(&first), "the first word was clipped\n{out}");
+        assert!(out.contains(&second), "the second word was clipped\n{out}");
+        // The old estimate said two rows for this — 105 characters over a
+        // 66-column line — where the wrapper needs three, and the second word
+        // was drawn outside the box and lost.
+        let rules: Vec<usize> = out
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.is_empty() && l.chars().all(|c| c == '\u{2500}'))
+            .map(|(i, _)| i)
+            .collect();
+        let words: Vec<usize> = out
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(&first) || l.contains(&second))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(words.len(), 2, "{out}");
+        // Both inside the box rather than spilling past its lower rule.
+        let (top, bottom) = (rules[0], rules[1]);
+        assert!(
+            words.iter().all(|w| (top..bottom).contains(w)),
+            "the prompt spilled out of its box\n{out}"
+        );
     }
 
     /// A directory long enough to crowd out the task is shortened, keeping
