@@ -297,35 +297,28 @@ mod bubbles {
     /// The blue it gives a language segment, `#7FD5EA`, for the agent.
     pub const AGENT: Color = Color::Rgb(0x7f, 0xd5, 0xea);
 
-    /// The grey it gives an execution time, `#AEA4BF`, for an age and for
-    /// anything with no colour of its own.
-    pub const MUTED: Color = Color::Rgb(0xae, 0xa4, 0xbf);
-    /// Its amber, `#E4F34A`, for a session that wants an answer.
-    pub const WAITING: Color = Color::Rgb(0xe4, 0xf3, 0x4a);
-    /// Its green, `#42E66C`, for one that is working.
-    pub const RUNNING: Color = Color::Rgb(0x42, 0xe6, 0x6c);
-    /// Its red, `#E64747`, for one that has failed.
-    pub const ERROR: Color = Color::Rgb(0xe6, 0x47, 0x47);
-
-    /// A state's colour on the fill.
-    ///
-    /// Every pill needs an explicit foreground. The fill is a fixed dark
-    /// navy, so a state that leaves the foreground to the terminal — which
-    /// is what an idle session does elsewhere in the list — would be drawn
-    /// in the terminal's own text colour, and on a light theme that is dark
-    /// text on a dark pill.
-    pub fn state(s: crate::model::RuntimeState) -> Color {
-        use crate::model::RuntimeState as R;
-        match s {
-            R::WaitingApproval | R::WaitingInput => WAITING,
-            R::Running | R::Starting => RUNNING,
-            R::Error => ERROR,
-            _ => MUTED,
-        }
-    }
-
     /// Two caps and a space either side of the content.
     pub const OVERHEAD: usize = 2;
+}
+
+/// A pill with no fill: the caps alone, dim, around content the caller
+/// colours.
+///
+/// The filled pill is right once — the prompt is a single line, and it is
+/// where the user acts. A row's second line is not once: four of them, times
+/// every row on screen, and a light terminal becomes a field of dark blocks.
+/// So the list keeps the shape and drops the fill.
+///
+/// Dropping it also gives the colour rule back. A fixed fill forces a fixed
+/// foreground, which is why the filled version has to carry a hardcoded
+/// colour per state; against the terminal's own background a state can wear
+/// the terminal's own colour again, as it does everywhere else in the list.
+fn chip(content: String, style: Style) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(bubbles::LEFT, theme::muted()),
+        Span::styled(content, style),
+        Span::styled(bubbles::RIGHT, theme::muted()),
+    ]
 }
 
 /// One pill: a cap, the content on the fill, and a cap.
@@ -604,18 +597,26 @@ fn meta_line(v: &SessionView, width: usize, now: DateTime<Utc>, selected: bool, 
         + 2;
     let room = width.saturating_sub(fixed).saturating_sub(3).max(4);
 
+    // The selected card keeps full contrast so it reads as part of the row
+    // the cursor is on; the rest recede.
+    let quiet = if selected {
+        Style::default()
+    } else {
+        theme::muted()
+    };
+
     let mut spans = vec![Span::raw(" ".repeat(W_GLYPH))];
-    spans.extend(bubble(agent, bubbles::AGENT));
+    spans.extend(chip(agent, quiet));
     spans.push(Span::raw(" "));
-    spans.extend(bubble(state, bubbles::state(v.state())));
+    spans.extend(chip(state, state_style(v.state())));
     spans.push(Span::raw(" "));
-    spans.extend(bubble(
+    spans.extend(chip(
         format!(" {} {} ", bubbles::FOLDER, text::truncate_to_width(&place, room)),
-        bubbles::PATH,
+        quiet,
     ));
     if let Some(a) = age_pill {
         spans.push(Span::raw(" "));
-        spans.extend(bubble(a, bubbles::MUTED));
+        spans.extend(chip(a, quiet));
     }
     Line::from(spans)
 }
@@ -1181,12 +1182,29 @@ mod tests {
         assert!(text.contains(bubbles::FOLDER), "{text:?}");
         assert!(text.contains("Claude") && text.contains("Needs approval"));
 
-        // Every pill carries an explicit foreground. The fill is a fixed dark
-        // navy, so a state that left the colour to the terminal would be the
-        // terminal's own text colour — dark on dark, on a light theme.
-        for span in line.spans.iter().filter(|s| s.style.bg == Some(bubbles::FILL)) {
-            assert!(span.style.fg.is_some(), "unfilled foreground: {span:?}");
-        }
+        // Nothing in a row is filled. Four filled pills times every row on
+        // screen is a field of dark blocks on a light terminal; the prompt is
+        // one line and can afford it, the list cannot.
+        assert!(
+            line.spans.iter().all(|s| s.style.bg.is_none()),
+            "a row must not be filled: {:?}",
+            line.spans
+        );
+        // And because it is not filled, a state wears the terminal's own
+        // colour here, the same as its glyph on the line above.
+        let waiting = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Needs approval"))
+            .expect("a state chip");
+        assert_eq!(waiting.style, state_style(v.state()), "{waiting:?}");
+
+        // The prompt, by contrast, keeps its fill.
+        let prompt = prompt_prefix(&app, 100, Skin::Bubbles);
+        assert!(
+            prompt.iter().any(|s| s.style.bg == Some(bubbles::FILL)),
+            "{prompt:?}"
+        );
 
         // The plain skin keeps the separated form, and no glyphs.
         let plain = meta_line(&v, 120, chrono::Utc::now(), false, Skin::Plain);
