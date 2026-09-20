@@ -97,10 +97,12 @@ Each title line starts with two marks: the state, then the provider.
 **Status** answers "what needs me now" — cards grouped by state, the task on its own line:
 
 ```
-── Needs you (1)
+  Needs you  1  ──────────────────────────────────────────────────────
 > ● claude-code-action auth subscription                        issue #880
      ◆ Claude   Needs input   󰉋 reed   34d
 ```
+
+A heading is carried across to whatever is on its right by a hairline — to the tally in the repository view, to the edge in the status view — so a group says how far it reaches instead of floating above its rows. The header counts in the same glyphs the rows wear rather than spelling them out, and a branch takes the branch mark a shell prompt gives it instead of a slash.
 
 **Repository** answers "what was I doing in reed" — one line each, grouped by repository, with a tally on every heading:
 

@@ -208,18 +208,35 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let area = with_margin(area);
     let width = area.width as usize;
 
-    let counts: Vec<String> = app
-        .state_summary()
-        .into_iter()
-        .map(|(label, n)| format!("{n} {label}"))
-        .collect();
-    let summary = if counts.is_empty() {
-        "no sessions".to_string()
-    } else {
-        counts.join(" · ")
-    };
+    // The same glyph a row wears, in front of the count it belongs to, so
+    // the header speaks the language the list speaks rather than spelling it
+    // out separately.
+    let mut summary: Vec<Span<'static>> = Vec::new();
+    for (state, label, n) in app.state_summary() {
+        if !summary.is_empty() {
+            summary.push(Span::raw("   "));
+        }
+        match state {
+            Some(s) => summary.push(Span::styled(state_glyph(s), state_style(s))),
+            None => summary.push(Span::styled("·", theme::muted())),
+        }
+        summary.push(Span::styled(format!(" {n} {label}"), theme::muted()));
+    }
+    if summary.is_empty() {
+        summary.push(Span::styled("no sessions", theme::muted()));
+    }
 
-    let mut second = format!("{} view · {}", app.view.label(), short_path(&app.shell_cwd));
+    // The directory wears the same mark here as in the prompt and on every
+    // row, so it reads as the same thing in all three places.
+    let folder = match Skin::current() {
+        Skin::Bubbles => format!("{} ", bubbles::FOLDER),
+        Skin::Plain => String::new(),
+    };
+    let mut second = format!(
+        "{} view · {folder}{}",
+        app.view.label(),
+        short_path(&app.shell_cwd)
+    );
     if !app.query.is_empty() || app.mode == Mode::Search {
         second.push_str(&format!("  ·  search: {}_", app.query));
     }
@@ -234,10 +251,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
                 text::truncate_to_width(&second, width),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-            Line::styled(
-                text::truncate_to_width(&summary, width),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Line::from(summary),
         ]),
         area,
     );
@@ -283,6 +297,10 @@ impl Skin {
 /// colour per segment on top of it.
 mod bubbles {
     use ratatui::style::Color;
+
+    /// The branch mark. Powerline's, which every Nerd Font carries, and the
+    /// one a shell prompt uses for the same thing.
+    pub const BRANCH: &str = "\u{e0a0}";
 
     /// Rounded left and right caps, and the folder mark the theme's path
     /// segment uses. All three are Nerd Font glyphs.
@@ -558,9 +576,17 @@ fn card_lines(
 /// prompt makes of the agent and the directory, so a row and the prompt read
 /// as the same design rather than two.
 fn meta_line(v: &SessionView, width: usize, now: DateTime<Utc>, selected: bool, skin: Skin) -> Line<'static> {
+    let branch = v.branch_or_worktree();
     let mut place = v.repo();
-    if let Some(b) = v.branch_or_worktree() {
-        place.push_str(&format!(" / {b}"));
+    if let Some(b) = &branch {
+        // A branch is not a path component, so it does not get a slash. In
+        // the plain skin there is no mark to give it instead.
+        let sep = if skin == Skin::Plain {
+            " / ".to_string()
+        } else {
+            format!("  {} ", bubbles::BRANCH)
+        };
+        place.push_str(&format!("{sep}{b}"));
     }
     let age = v.age(now);
 
@@ -684,16 +710,22 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     } else {
         h.label.clone()
     };
-    let left = vec![
-        Span::styled(label, group_style(h)),
-        Span::styled(format!(" {}", h.count), theme::muted()),
-    ];
-    if view != View::Repository {
-        return Line::from(left);
+    let mut left = vec![Span::styled(label, group_style(h))];
+    if Skin::current() == Skin::Plain {
+        left.push(Span::styled(format!(" {}", h.count), theme::muted()));
+    } else {
+        left.push(Span::raw(" "));
+        left.extend(chip(format!(" {} ", h.count), theme::muted()));
     }
 
     // The tally's glyphs each wear their state's colour, so a repository row
     // says at a glance whether anything in it needs you.
+    if view != View::Repository {
+        let used: usize = left.iter().map(|s| s.content.width()).sum();
+        left.push(rule_to(width, used));
+        return Line::from(left);
+    }
+
     let tally: Vec<Span<'static>> = vec![
         Span::styled("●", theme::state(RuntimeState::WaitingInput)),
         Span::styled(format!(" {}  ", h.needs_you), theme::muted()),
@@ -706,12 +738,26 @@ fn group_line(h: &GroupHeader, view: View, width: usize) -> Line<'static> {
     ];
     let left_w: usize = left.iter().map(|s| s.content.width()).sum();
     let tally_w: usize = tally.iter().map(|s| s.content.width()).sum();
-    let gap = width.saturating_sub(left_w).saturating_sub(tally_w);
 
     let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(rule_to(width, left_w + tally_w));
     spans.extend(tally);
     Line::from(spans)
+}
+
+/// The hairline that carries a heading across to whatever sits on the right.
+///
+/// A heading with nothing after it floats above its rows without saying how
+/// far its group reaches. A dim rule ties the two ends of the line together
+/// and costs no row of its own; it is the quietest thing on the screen, so it
+/// organises without competing.
+fn rule_to(width: usize, used: usize) -> Span<'static> {
+    // A space either side, so the rule never touches the text.
+    let span = width.saturating_sub(used).saturating_sub(2);
+    if span == 0 {
+        return Span::raw(" ".repeat(width.saturating_sub(used)));
+    }
+    Span::styled(format!(" {} ", "\u{2500}".repeat(span)), theme::rule())
 }
 
 fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
@@ -1130,7 +1176,13 @@ mod tests {
     /// terminal size, so compare on the text with all spaces removed.
     fn has(rendered: &str, needle: &str) -> bool {
         fn squeeze(s: &str) -> String {
-            s.chars().filter(|c| !c.is_whitespace()).collect()
+            s.chars()
+                // Whitespace is layout, and so is everything decorative: the
+                // bubble caps and marks, which live in the private use area,
+                // and the hairline that carries a heading across. What is
+                // left is the text, which is what these assertions are about.
+                .filter(|c| !c.is_whitespace() && !('\u{e000}'..='\u{f8ff}').contains(c) && *c != '\u{2500}')
+                .collect()
         }
         squeeze(rendered).contains(&squeeze(needle))
     }
@@ -1154,6 +1206,65 @@ mod tests {
             assert!(has(&out, needle), "{needle} missing in\n{out}");
         }
         assert!(has(&out, "Idle 1"), "{out}");
+    }
+
+    /// A heading is carried across to whatever sits on its right, so a group
+    /// says how far it reaches instead of floating above its rows.
+    #[test]
+    fn a_heading_is_carried_across_by_a_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![session(
+                "a",
+                "Fix the auth handler",
+                RuntimeState::WaitingApproval,
+            )],
+        );
+
+        let out = render(&app, 120, 24);
+        let heading = out.lines().find(|l| has(l, "Needs you")).unwrap();
+        assert!(heading.contains('\u{2500}'), "{heading:?}");
+        // It reaches the right-hand side rather than stopping short.
+        assert!(heading.trim_end().width() > 100, "{heading:?}");
+
+        // In the repository view it stops at the tally instead of the edge,
+        // which is what ties the count to the name.
+        app.view = crate::model::View::Repository;
+        let out = render(&app, 120, 24);
+        let heading = out.lines().find(|l| has(l, "api")).unwrap();
+        let rule_end = heading.rfind('\u{2500}').unwrap();
+        let tally_at = heading.find('●').unwrap();
+        assert!(rule_end < tally_at, "{heading:?}");
+    }
+
+    /// The header counts what the list holds in the list's own language: the
+    /// same glyph a row wears, in front of the number it belongs to.
+    #[test]
+    fn the_header_counts_in_glyphs() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app_with(
+            &dir,
+            vec![
+                session("a", "Fix the auth handler", RuntimeState::WaitingApproval),
+                session("b", "Tidy up the README", RuntimeState::Idle),
+            ],
+        );
+        let out = render(&app, 120, 24);
+        let counts = out.lines().find(|l| l.contains("needs you")).unwrap();
+        assert!(
+            counts.contains(state_glyph(RuntimeState::WaitingApproval)),
+            "{counts:?}"
+        );
+        assert!(
+            counts.contains("1 needs you") && counts.contains("1 idle"),
+            "{counts:?}"
+        );
+        // The glyph comes before the count it belongs to.
+        assert!(
+            counts.find(state_glyph(RuntimeState::WaitingApproval)) < counts.find("1 needs you"),
+            "{counts:?}"
+        );
     }
 
     /// A row's second line is the same four-piece sentence the prompt makes
@@ -1253,7 +1364,7 @@ mod tests {
         let heading = |needle: &str| {
             lines
                 .iter()
-                .position(|l| l.contains(needle))
+                .position(|l| has(l, needle))
                 .unwrap_or_else(|| panic!("no heading {needle} in\n{out}"))
         };
         let first = heading("Needs you");

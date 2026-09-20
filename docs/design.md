@@ -110,11 +110,16 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **The prompt's bubbles are the one place that departs from this**, and do so deliberately: they carry `bubblesextra`'s own hex colours, and a fixed fill forces fixed foregrounds with it. That is affordable once, on one line. It is not affordable on every row, which is why the list's badges are unfilled — and unfilled means a state can wear the terminal's own colour again, the same colour its glyph wears on the line above. `AGNT_STYLE=plain` returns everything to the rule.
 
+**One language, everywhere.** A directory wears the same folder mark in the header, in the prompt and on every row. A state wears the same glyph on a row, in a group heading's tally and in the header's counts — which used to spell the counts out in words while the rest of the screen used marks. A branch wears the branch mark a shell prompt gives it rather than a slash, because a branch is not a path component. Each of these was already drawn somewhere; the work was drawing it the same way in the other places.
+
+**A heading is carried across to whatever is on its right by a hairline.** A heading with nothing after it floats above its rows without saying how far its group reaches. In the repository view the rule runs to the tally, tying a repository's name to what is in it; in the status view it runs to the edge. It is the dimmest thing on the screen and costs no row of its own, so it organises without competing.
+
 **Spacing.** Every heading but the first has a blank line above it, and every heading with rows under it has one below, so a heading reads as a heading rather than as the first row of its group. The header, the prompt and the footer share a two-cell left margin — the width of the list's cursor gutter — so their text lines up with the rows' glyphs and nothing sits flush against the terminal's edge.
 
 **Rows never change height. Only the cursor moves.** Every card is two lines and every compact row is one, whichever is selected. The selected session's remaining details — its shortened path, its classification when one is set, its short id, and a preview once a provider can supply one — sit on a single footer line that is always present, blank when nothing is selected:
 
 ```
+  Needs you  1  ────────────────────────────────────────────────────
 > ● claude-code-action auth subscription                      issue #880
      ◆ Claude   Needs input   󰉋 reed   34d
   ○ review pr #985

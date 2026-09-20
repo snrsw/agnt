@@ -377,8 +377,8 @@ impl App {
 
     /// Counts for the header, in list order: how many need you, are working,
     /// and so on, with folded history last.
-    pub fn state_summary(&self) -> Vec<(&'static str, usize)> {
-        let mut live: BTreeMap<u8, (&'static str, usize)> = BTreeMap::new();
+    pub fn state_summary(&self) -> Vec<(Option<RuntimeState>, &'static str, usize)> {
+        let mut live: BTreeMap<u8, (Option<RuntimeState>, &'static str, usize)> = BTreeMap::new();
         let mut folded = 0usize;
         for v in self.views() {
             if !self.show_hidden && v.is_hidden() {
@@ -389,12 +389,15 @@ impl App {
                 continue;
             }
             let state = v.state();
-            let entry = live.entry(state.sort_rank()).or_insert((state.short_label(), 0));
-            entry.1 += 1;
+            let entry = live
+                .entry(state.sort_rank())
+                .or_insert((Some(state), state.short_label(), 0));
+            entry.2 += 1;
         }
-        let mut out: Vec<(&'static str, usize)> = live.into_values().collect();
+        let mut out: Vec<(Option<RuntimeState>, &'static str, usize)> = live.into_values().collect();
         if folded > 0 {
-            out.push(("in history", folded));
+            // Folded rows have no one state, so they get no glyph.
+            out.push((None, "in history", folded));
         }
         out
     }
@@ -1805,13 +1808,21 @@ mod tests {
         );
         assert_eq!(
             app.state_summary(),
-            vec![("needs you", 1), ("idle", 1), ("in history", 1)]
+            vec![
+                (Some(RuntimeState::WaitingApproval), "needs you", 1),
+                (Some(RuntimeState::Idle), "idle", 1),
+                (None, "in history", 1)
+            ]
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
         assert_eq!(
             app.state_summary(),
-            vec![("needs you", 1), ("idle", 1), ("stopped", 1)]
+            vec![
+                (Some(RuntimeState::WaitingApproval), "needs you", 1),
+                (Some(RuntimeState::Idle), "idle", 1),
+                (Some(RuntimeState::Stopped), "stopped", 1)
+            ]
         );
     }
 
