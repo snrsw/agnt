@@ -120,7 +120,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
   ○ review pr #985
     Claude · Idle · reed · 1h
 ──────────────────────────────────────────────────────────────────────────
-  ◆ Claude    ~/src/reed  >>> Describe a task for a new session
+  ◆ Claude    ~/src/reed  Describe a task for a new session
 ──────────────────────────────────────────────────────────────────────────
 …/GrassAI-Inc/reed · 5175105c
 type to start a session · enter to attach · ? for shortcuts
@@ -149,11 +149,11 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 | ? | The full key list, on an empty prompt |
 | Ctrl+C | Leave the list. The effect on sessions follows the chosen runtime's behaviour |
 
-**The prompt says where the task is going before it says anything else.** The agent that will take it and the directory it will start in, each in a bubble, then the caret. Both of the first two had a line of their own underneath the prompt, which meant reading down to answer "where is this going?" while typing across; they are the subject of the sentence being written, so they sit in front of it, the way a shell puts the directory in front of the command. That also gives the row back to the list, since the box is now a rule, one line, and a rule.
+**The prompt says where the task is going before it says anything else.** The agent that will take it and the directory it will start in, each in a bubble, then what is being typed. Both of the first two had a line of their own underneath the prompt, which meant reading down to answer "where is this going?" while typing across; they are the subject of the sentence being written, so they sit in front of it, the way a shell puts the directory in front of the command. That also gives the row back to the list, since the box is now a rule, one line, and a rule.
 
-The caret is three characters rather than one because what precedes it is a sentence, and the eye needs a hard edge to find where the typing starts. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
+There is no caret. A `>` earns its place on a bare prompt by marking where the typing starts; a pill has a rounded edge that does the same job, so a caret after one is a second marker for a boundary already drawn. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
 
-**The bubbles are oh-my-posh's `bubblesextra`.** A rounded cap, the content on a fill, a rounded cap: `\ue0b6` and `\ue0b4` drawn in the fill colour against the terminal's own background, which is what makes a rectangle of background read as a pill. The palette is the theme's — `#29315A` fill, `#3EC669` for the path with its `\ue5ff` folder mark, `#7FD5EA` for the agent, `#E64747` for the caret. The reason to quote a prompt theme is that a user running it in their shell sees the same machine in both places; this project's author does.
+**The bubbles are oh-my-posh's `bubblesextra`.** A rounded cap, the content on a fill, a rounded cap: `\ue0b6` and `\ue0b4` drawn in the fill colour against the terminal's own background, which is what makes a rectangle of background read as a pill. The palette is the theme's — `#29315A` fill, `#3EC669` for the path with its `\ue5ff` folder mark, and `#7FD5EA` for the agent. The reason to quote a prompt theme is that a user running it in their shell sees the same machine in both places; this project's author does.
 
 **It needs a Nerd Font, and that cannot be detected from inside a terminal.** Without one the caps come out as blank boxes, or worse as glyphs the terminal gives a different advance width — which puts every column after them out by one, a failure this project has already had once with a different glyph. So it is a choice rather than a guess: `AGNT_PROMPT=plain` gives the same prompt with the same words, in named ANSI colours and no private-use characters. A test asserts that every glyph in either prompt is one cell wide, and another that the plain one contains no private-use characters at all.
 

@@ -42,14 +42,14 @@ To start a session, just type what it should do — the prompt at the bottom is 
 
 ```
 ──────────────────────────────────────────────────────────
-  ◆ Claude    ~/src/api  >>> fix the flaky billing test_
+  ◆ Claude    ~/src/api  fix the flaky billing test_
 ──────────────────────────────────────────────────────────
 enter to start · tab for agent · esc to clear
 ```
 
 The agent and the directory are bubbles, in the style of oh-my-posh's [`bubblesextra`](https://github.com/JanDeDobbeleer/oh-my-posh/blob/main/themes/bubblesextra.omp.json) — so if you run that in your shell, both prompts look like the same machine. **It needs a Nerd Font**: without one the rounded caps come out as blank boxes or, worse, as glyphs your terminal gives a different width, which knocks every column after them sideways. That cannot be detected from inside a terminal, so `AGNT_PROMPT=plain` gives the same prompt with the same words, in named ANSI colours and no special glyphs.
 
-The prompt says where the task is going before it says anything else: the agent that will take it, the directory it will start in, then the caret. Those two used to sit on a line underneath, which meant reading down to answer "where is this going?" while typing across — and they are the subject of the sentence being written, so they belong in front of it, the way a shell puts the directory in front of the command. `Tab` changes the agent and the prompt changes with it. On a narrow terminal the path gives way first, keeping the components that say which checkout it is.
+The prompt says where the task is going before it says anything else: the agent that will take it, then the directory it will start in, then what you type. Those two used to sit on a line underneath, which meant reading down to answer "where is this going?" while typing across — and they are the subject of the sentence being written, so they belong in front of it, the way a shell puts the directory in front of the command. `Tab` changes the agent and the prompt changes with it. On a narrow terminal the path gives way first, keeping the components that say which checkout it is.
 
 The task text is the only thing you have to type. Because every printable key belongs to the prompt, **the actions are Ctrl chords**, and the footer shows only the few that matter right now; `?` on an empty prompt lists the rest.
 

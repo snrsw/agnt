@@ -243,11 +243,6 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// The caret. Three of them rather than one, because what precedes it is a
-/// sentence about where the task is going and the eye needs a hard edge to
-/// find where the typing starts.
-const CARET: &str = ">>> ";
-
 /// How the prompt is drawn.
 ///
 /// `Bubbles` follows oh-my-posh's `bubblesextra`: each piece of context is a
@@ -300,8 +295,6 @@ mod bubbles {
     pub const PATH: Color = Color::Rgb(0x3e, 0xc6, 0x69);
     /// The blue it gives a language segment, `#7FD5EA`, for the agent.
     pub const AGENT: Color = Color::Rgb(0x7f, 0xd5, 0xea);
-    /// The red on its own prompt marker, `#E64747`.
-    pub const CARET: Color = Color::Rgb(0xe6, 0x47, 0x47);
 
     /// Two caps and a space either side of the content.
     pub const OVERHEAD: usize = 2;
@@ -325,32 +318,22 @@ fn bubble(content: String, fg: ratatui::style::Color) -> Vec<Span<'static>> {
 /// it, the way a shell puts the directory in front of the command.
 fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'static>> {
     let provider = app.draft.provider;
-    let active = !app.draft.buffer.trim().is_empty();
 
     // At most a third of the line, so there is always room to type. The
-    // agent and the caret are short and fixed; the path is the part that
-    // has to give.
+    // agent is short and fixed; the path is the part that has to give.
     let room = (width / 3).min(40);
 
     match style {
-        PromptStyle::Plain => {
-            let caret = if active {
-                theme::accent().add_modifier(Modifier::BOLD)
-            } else {
-                theme::muted()
-            };
-            vec![
-                Span::styled(
-                    format!("{} {}", provider.icon(), provider.label()),
-                    theme::accent(),
-                ),
-                Span::styled(
-                    format!("  {}  ", short_path_within(&app.new_session_cwd(), room)),
-                    theme::muted(),
-                ),
-                Span::styled(CARET, caret),
-            ]
-        }
+        PromptStyle::Plain => vec![
+            Span::styled(
+                format!("{} {}", provider.icon(), provider.label()),
+                theme::accent(),
+            ),
+            Span::styled(
+                format!("  {}  ", short_path_within(&app.new_session_cwd(), room)),
+                theme::muted(),
+            ),
+        ],
         PromptStyle::Bubbles => {
             let path = short_path_within(&app.new_session_cwd(), room.saturating_sub(bubbles::OVERHEAD + 2));
             let mut spans = bubble(
@@ -359,16 +342,10 @@ fn prompt_prefix(app: &App, width: usize, style: PromptStyle) -> Vec<Span<'stati
             );
             spans.push(Span::raw(" "));
             spans.extend(bubble(format!(" {} {} ", bubbles::FOLDER, path), bubbles::PATH));
+            // One space, and then whatever is being typed. The pill's own
+            // rounded edge is the hard edge the eye needs to find where the
+            // typing starts, so there is nothing left for a caret to do.
             spans.push(Span::raw(" "));
-            let caret = Style::default().fg(bubbles::CARET);
-            spans.push(Span::styled(
-                CARET,
-                if active {
-                    caret.add_modifier(Modifier::BOLD)
-                } else {
-                    caret.add_modifier(Modifier::DIM)
-                },
-            ));
             spans
         }
     }
@@ -1204,7 +1181,7 @@ mod tests {
     /// agent will take it and which directory it starts in. Both used to sit
     /// on a line of their own underneath.
     #[test]
-    fn the_prompt_says_which_agent_and_where_before_the_caret() {
+    fn the_prompt_says_which_agent_and_where_before_the_task() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.shell_cwd = std::path::PathBuf::from("/tmp/some/checkout");
@@ -1217,26 +1194,32 @@ mod tests {
                 .to_string()
         };
 
-        let empty = line_with(&app, ">>>");
+        let empty = line_with(&app, "Describe a task");
         assert!(empty.contains("Claude"), "{empty}");
         assert!(empty.contains("/tmp/some/checkout"), "{empty}");
-        assert!(empty.contains("Describe a task for a new session"), "{empty}");
-        // The agent and the directory come before the caret, not after it.
+        // Both come before the text, not after it.
+        let text_at = empty.find("Describe a task");
         assert!(
-            empty.find("Claude") < empty.find(">>>") && empty.find("/tmp/some/checkout") < empty.find(">>>"),
+            empty.find("Claude") < text_at && empty.find("/tmp/some/checkout") < text_at,
             "{empty}"
         );
 
         // The agent follows Tab, since that is what Enter will start.
         app.draft.provider = Provider::Codex;
         app.draft.buffer = "fix the billing test".into();
-        let typed = line_with(&app, ">>>");
+        let typed = line_with(&app, "fix the billing test");
         assert!(typed.contains("Codex") && !typed.contains("Claude"), "{typed}");
-        assert!(typed.contains(">>> fix the billing test"), "{typed}");
+        assert!(
+            typed.find("/tmp/some/checkout") < typed.find("fix the billing test"),
+            "{typed}"
+        );
 
         // And it is one line: the box is a rule, the prompt, a rule.
         let out = render(&app, 100, 24);
-        let at = out.lines().position(|l| l.contains(">>>")).unwrap();
+        let at = out
+            .lines()
+            .position(|l| l.contains("fix the billing test"))
+            .unwrap();
         for offset in [at - 1, at + 1] {
             let rule: &str = out.lines().nth(offset).unwrap();
             assert!(rule.chars().all(|c| c == '\u{2500}'), "{rule:?}\n{out}");
@@ -1321,7 +1304,8 @@ mod tests {
         assert!(spans.iter().all(|s| s.style.bg.is_none()));
         // It still says the same things.
         assert!(line.contains("Claude") && line.contains("/tmp/some/checkout"));
-        assert!(line.contains(">>>"));
+        // And nothing stands between the directory and the task but a space.
+        assert!(line.ends_with("  "), "{line:?}");
     }
 
     /// A directory long enough to crowd out the task is shortened, keeping
@@ -1334,11 +1318,11 @@ mod tests {
             std::path::PathBuf::from("/Users/someone/src/github.com/an-org/a-long-repository-name");
 
         let wide = render(&app, 120, 24);
-        let wide_line = wide.lines().find(|l| l.contains(">>>")).unwrap();
+        let wide_line = wide.lines().find(|l| l.contains("Claude")).unwrap();
         assert!(wide_line.contains("a-long-repository-name"), "{wide_line}");
 
         let narrow = render(&app, 60, 24);
-        let narrow_line = narrow.lines().find(|l| l.contains(">>>")).unwrap();
+        let narrow_line = narrow.lines().find(|l| l.contains("Claude")).unwrap();
         assert!(narrow_line.contains('\u{2026}'), "{narrow_line}");
         // The tail is kept: it is what says which checkout this is.
         assert!(narrow_line.contains("a-long-repository-name"), "{narrow_line}");
