@@ -719,7 +719,10 @@ impl App {
     /// on one line never exists long enough to be seen, and starts the next
     /// session where the shell was before it.
     pub fn poll_shell_cwd(&mut self) {
-        if self.pty.is_none() {
+        // Only while the user is in the shell: it cannot move on its own, and
+        // the shell now runs from launch, so polling outside shell mode would
+        // be a process spawned every 150 ms for the life of the program.
+        if self.pty.is_none() || self.input_mode != InputMode::Shell {
             return;
         }
         let now = std::time::Instant::now();
@@ -1191,6 +1194,27 @@ fn spawn_refresh(app: &mut App, adapters: &[Arc<dyn Adapter>], tx: mpsc::Sender<
     });
 }
 
+/// Start the embedded shell, sized to the text area it will be drawn in.
+///
+/// Errors land in the app as a notice rather than being returned: a shell
+/// that will not start is worth saying so about, and is not a reason for the
+/// list to fail.
+fn start_shell(
+    app: &mut App,
+    guard: &mut TerminalGuard,
+    ev_tx: &mpsc::Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    let tx = ev_tx.clone();
+    let (rows, cols) = ui::shell_area_size(guard.terminal().size()?.into());
+    app.open_shell(&shell::program(), rows, cols, move || {
+        // A blocking send would deadlock the reader thread against a full
+        // channel; a dropped redraw is harmless, because the next one carries
+        // the screen.
+        let _ = tx.try_send(AppEvent::ShellDrew);
+    });
+    Ok(())
+}
+
 /// Run the interactive list until the user quits.
 pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::Result<()> {
     let mut app = App::load(&paths);
@@ -1201,6 +1225,14 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
     let mut guard = TerminalGuard::enter()?;
     let _reader = terminal::spawn_input_reader(gate.clone(), in_tx);
     spawn_refresh(&mut app, &adapters, ev_tx.clone());
+
+    // Start the shell now rather than when Shift+Tab is first pressed. How
+    // long a shell takes to start is its own configuration and not something
+    // agnt can make faster — a `direnv` hook that sources a nix dev shell
+    // costs seconds, in a terminal as much as here — so the wait is moved to
+    // where the user is reading the list instead of to where they are waiting
+    // for a prompt. Nothing blocks on it: the reader thread does the waiting.
+    start_shell(&mut app, &mut guard, &ev_tx)?;
 
     let mut effects: Vec<Effect> = Vec::new();
     loop {
@@ -1309,16 +1341,7 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                     };
                     spawn_refresh(&mut app, &adapters, ev_tx.clone());
                 }
-                Effect::StartShell => {
-                    let tx = ev_tx.clone();
-                    let (rows, cols) = ui::shell_area_size(guard.terminal().size()?.into());
-                    app.open_shell(&shell::program(), rows, cols, move || {
-                        // A blocking send would deadlock the reader thread
-                        // against a full channel; a dropped redraw is
-                        // harmless, because the next one carries the screen.
-                        let _ = tx.try_send(AppEvent::ShellDrew);
-                    });
-                }
+                Effect::StartShell => start_shell(&mut app, &mut guard, &ev_tx)?,
                 Effect::Start {
                     provider,
                     request: req,

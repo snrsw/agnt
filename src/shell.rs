@@ -87,6 +87,7 @@ pub struct PtyShell {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     pid: Option<u32>,
     size: (u16, u16),
+    program: PathBuf,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -169,7 +170,13 @@ impl PtyShell {
             child,
             pid,
             size: (rows, cols),
+            program: program.to_path_buf(),
         })
+    }
+
+    /// Which shell is running, for the line shown while it is starting.
+    pub fn program(&self) -> &Path {
+        &self.program
     }
 
     /// How many rows of the shell's screen have anything in them.

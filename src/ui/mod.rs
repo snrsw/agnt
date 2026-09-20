@@ -173,6 +173,25 @@ fn draw_shell(frame: &mut Frame, outer: Rect, app: &App) {
         return;
     };
     let screen = parser.screen();
+
+    // Until the shell has drawn anything there is nothing to show, and an
+    // empty box looks broken rather than busy. How long this lasts is the
+    // shell's own configuration — `direnv` sourcing a nix dev shell is
+    // seconds — so it says which shell is being waited for.
+    if screen.contents().trim().is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                text::truncate_to_width(
+                    &format!("starting {}…", short_path(pty.program())),
+                    area.width as usize,
+                ),
+                Style::default().add_modifier(Modifier::DIM),
+            )),
+            area,
+        );
+        return;
+    }
+
     frame.render_widget(tui_term::widget::PseudoTerminal::new(screen), area);
 
     if !screen.hide_cursor() {
@@ -817,6 +836,38 @@ mod tests {
             .map(|row| row.iter().map(|c| c.symbol()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A shell that has not drawn anything yet says so. Starting one costs
+    /// whatever the user's configuration costs — seconds, where `direnv`
+    /// sources a nix dev shell — and an empty box in the meantime reads as
+    /// broken rather than busy.
+    #[tokio::test]
+    async fn a_shell_that_has_not_drawn_yet_says_it_is_starting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.shell_cwd = dir.path().to_path_buf();
+        app.input_mode = crate::app::InputMode::Shell;
+        app.open_shell(std::path::Path::new("/bin/sh"), 8, 96, || {});
+        if app.pty.is_none() {
+            eprintln!("no pty available here; skipping");
+            return;
+        }
+
+        // Drawn before the shell has had time to write: spawning a process
+        // takes milliseconds and this render takes microseconds.
+        let drawn = render(&app, 100, 30);
+        assert!(drawn.contains("starting /bin/sh"), "{drawn}");
+
+        // And it is replaced by the shell itself once there is a prompt.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let now = render(&app, 100, 30);
+            if !now.contains("starting /bin/sh") {
+                return;
+            }
+        }
+        panic!("the starting line never gave way to the shell");
     }
 
     /// The text area holds the shell's own screen: the command's output,

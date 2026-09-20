@@ -57,6 +57,13 @@ The task text is the only thing you have to type. Because every printable key be
 
 This replaced an earlier version that handed single lines to `$SHELL -c` and rebuilt the missing pieces — expanding abbreviations itself, appending a `$PWD` trailer to follow `cd`, probing the shell to find out whether it had understood. Each piece worked; together they were a worse terminal than the one already installed.
 
+**It starts when agnt starts**, not when you first press `S-Tab`, so the wait falls on the list rather than on a prompt you are waiting for. How long your shell takes to be ready is your own configuration and not something agnt can speed up — fish with a `direnv` hook that sources a nix dev shell takes about 10 seconds on the machine this was built on, against 0.2 seconds for `/bin/sh` in the same directory, and a new terminal tab pays exactly the same. To see where yours goes:
+
+```sh
+nix develop --command cargo run --example shell_timing            # your shell
+nix develop --command cargo run --example shell_timing -- /bin/sh # for contrast
+```
+
 **Which shell you get is the one the OS has on file for you** — what `chsh` set — not `$SHELL`. `$SHELL` is the conventional answer and it is wrong inside a development shell: `nix develop` exports its own bash as `$SHELL`, so agnt run that way would hand you bash however your own shell is set. `agnt doctor` prints the shell it will open, and says so when it is ignoring a `$SHELL` that disagrees. Set `AGNT_SHELL` to override both.
 
 - **`Enter` is overloaded on the prompt**: it starts the typed task, or attaches to the selected row when the prompt is empty.
