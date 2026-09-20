@@ -47,7 +47,7 @@ To start a session, just type what it should do — the prompt at the bottom is 
 enter to start · tab for agent · esc to clear
 ```
 
-The agent and the directory are bubbles, in the style of oh-my-posh's [`bubblesextra`](https://github.com/JanDeDobbeleer/oh-my-posh/blob/main/themes/bubblesextra.omp.json). Each row's second line wears the same badges without the fill — four filled pills times every row on screen is a field of dark blocks, which is not what a list to be scanned should look like — so if you run that in your shell, both prompts look like the same machine. **It needs a Nerd Font**: without one the rounded caps come out as blank boxes or, worse, as glyphs your terminal gives a different width, which knocks every column after them sideways. That cannot be detected from inside a terminal, so `AGNT_STYLE=plain` gives the same prompt with the same words, in named ANSI colours and no special glyphs.
+The agent and the directory are bubbles, in the style of oh-my-posh's [`bubblesextra`](https://github.com/JanDeDobbeleer/oh-my-posh/blob/main/themes/bubblesextra.omp.json) — so if you run that in your shell, your prompt and agnt's look like the same machine. The list stays plain text: a badge is an edge drawn around a field, and an edge per field times every row is a grid of boxes rather than a list to scan. **It needs a Nerd Font**: without one the rounded caps come out as blank boxes or, worse, as glyphs your terminal gives a different width, which knocks every column after them sideways. That cannot be detected from inside a terminal, so `AGNT_STYLE=plain` gives the same prompt with the same words, in named ANSI colours and no special glyphs.
 
 The prompt says where the task is going before it says anything else: the agent that will take it, then the directory it will start in, then what you type. Those two used to sit on a line underneath, which meant reading down to answer "where is this going?" while typing across — and they are the subject of the sentence being written, so they belong in front of it, the way a shell puts the directory in front of the command. `Tab` changes the agent and the prompt changes with it. On a narrow terminal the path gives way first, keeping the components that say which checkout it is.
 
@@ -99,7 +99,7 @@ Each title line starts with two marks: the state, then the provider.
 ```
   Needs you  1  ──────────────────────────────────────────────────────
 > ● claude-code-action auth subscription                        issue #880
-     ◆ Claude   Needs input   󰉋 reed   34d
+    Claude · Needs input · reed · 34d
 ```
 
 A heading is carried across to whatever is on its right by a hairline — to the tally in the repository view, to the edge in the status view — so a group says how far it reaches instead of floating above its rows. The header counts in the same glyphs the rows wear rather than spelling them out, and a branch takes the branch mark a shell prompt gives it instead of a slash.

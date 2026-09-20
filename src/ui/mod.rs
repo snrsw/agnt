@@ -298,10 +298,6 @@ impl Skin {
 mod bubbles {
     use ratatui::style::Color;
 
-    /// The branch mark. Powerline's, which every Nerd Font carries, and the
-    /// one a shell prompt uses for the same thing.
-    pub const BRANCH: &str = "\u{e0a0}";
-
     /// Rounded left and right caps, and the folder mark the theme's path
     /// segment uses. All three are Nerd Font glyphs.
     pub const LEFT: &str = "\u{e0b6}";
@@ -527,7 +523,6 @@ fn card_lines(
     now: DateTime<Utc>,
     selected: bool,
     suffix: &str,
-    skin: Skin,
 ) -> Vec<Line<'static>> {
     let links = links_text(v);
     let links_w = if links.is_empty() { 0 } else { links.width() + 2 };
@@ -567,84 +562,36 @@ fn card_lines(
     // Always two lines. The selected row changes colour, never height: a row
     // that grew under the cursor pushed every row below it as the cursor
     // moved, and the list looked as though it was shuffling.
-    vec![Line::from(first), meta_line(v, width, now, selected, skin)]
+    vec![Line::from(first), meta_line(v, width, now, selected)]
 }
 
-/// A card's second line: agent, state in words, where, and how long ago.
+/// A card's second line: agent, state in words, where, and how long ago,
+/// separated by middots.
 ///
-/// In the bubbles skin these are pills, the same four-piece sentence the
-/// prompt makes of the agent and the directory, so a row and the prompt read
-/// as the same design rather than two.
-fn meta_line(v: &SessionView, width: usize, now: DateTime<Utc>, selected: bool, skin: Skin) -> Line<'static> {
-    let branch = v.branch_or_worktree();
+/// It was badges for a while — the same shape the prompt uses — and reverted:
+/// a badge per field, times every row on screen, turns a list into a field of
+/// outlined boxes. The prompt can afford the shape because it is one line and
+/// the place the user acts. A list is for scanning, and plain text with a
+/// separator scans better than anything with edges on it.
+fn meta_line(v: &SessionView, width: usize, now: DateTime<Utc>, selected: bool) -> Line<'static> {
     let mut place = v.repo();
-    if let Some(b) = &branch {
-        // A branch is not a path component, so it does not get a slash. In
-        // the plain skin there is no mark to give it instead.
-        let sep = if skin == Skin::Plain {
-            " / ".to_string()
-        } else {
-            format!("  {} ", bubbles::BRANCH)
-        };
-        place.push_str(&format!("{sep}{b}"));
-    }
-    let age = v.age(now);
-
-    if skin == Skin::Plain {
-        let mut meta = vec![v.session.provider().label().to_string(), v.state_label()];
-        meta.push(place);
-        meta.extend(age);
-        let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
-        // The selected card's second line keeps full contrast so it reads as
-        // part of the row the cursor is on.
-        let style = if selected {
-            Style::default()
-        } else {
-            theme::muted()
-        };
-        return Line::styled(text::truncate_to_width(&second, width), style);
+    if let Some(b) = v.branch_or_worktree() {
+        place.push_str(&format!(" / {b}"));
     }
 
-    // The fixed pieces first, so what is left is what the place may have.
-    let agent = format!(
-        " {} {} ",
-        v.session.provider().icon(),
-        v.session.provider().label()
-    );
-    let state = format!(" {} ", v.state_label());
-    let age_pill = age.map(|a| format!(" {a} "));
-    let fixed = W_GLYPH
-        + agent.width()
-        + state.width()
-        + age_pill
-            .as_deref()
-            .map_or(0, |a| a.width() + bubbles::OVERHEAD + 1)
-        + bubbles::OVERHEAD * 3
-        + 2;
-    let room = width.saturating_sub(fixed).saturating_sub(3).max(4);
+    let mut meta = vec![v.session.provider().label().to_string(), v.state_label()];
+    meta.push(place);
+    meta.extend(v.age(now));
+    let second = format!("{}{}", " ".repeat(W_GLYPH), meta.join(" · "));
 
-    // The selected card keeps full contrast so it reads as part of the row
-    // the cursor is on; the rest recede.
-    let quiet = if selected {
+    // The selected card's second line keeps full contrast so it reads as
+    // part of the row the cursor is on.
+    let style = if selected {
         Style::default()
     } else {
         theme::muted()
     };
-
-    let mut spans = vec![Span::raw(" ".repeat(W_GLYPH))];
-    spans.extend(chip(agent, quiet));
-    spans.push(Span::raw(" "));
-    spans.extend(chip(state, state_style(v.state())));
-    spans.push(Span::raw(" "));
-    spans.extend(chip(
-        format!(" {} {} ", bubbles::FOLDER, text::truncate_to_width(&place, room)),
-        quiet,
-    ));
-    if let Some(a) = age_pill {
-        spans.push(Span::raw(" "));
-        spans.extend(chip(a, quiet));
-    }
-    Line::from(spans)
+    Line::styled(text::truncate_to_width(&second, width), style)
 }
 
 /// A session as one line under a repository heading. The repository is already
@@ -838,7 +785,7 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
                     style = style.add_modifier(Modifier::DIM);
                 }
                 let lines = if app.view.is_cards() {
-                    card_lines(v, total, now, selected, &suffix, Skin::current())
+                    card_lines(v, total, now, selected, &suffix)
                 } else {
                     vec![compact_line(v, total, now, &suffix)]
                 };
@@ -1267,11 +1214,14 @@ mod tests {
         );
     }
 
-    /// A row's second line is the same four-piece sentence the prompt makes
-    /// of the agent and the directory, drawn the same way, so a row and the
-    /// prompt read as one design rather than two.
+    /// A row's second line is plain text with middots.
+    ///
+    /// It was badges for a while, the same shape the prompt uses, and that is
+    /// deliberately reverted: a badge per field, times every row on screen,
+    /// turns a list into a field of outlined boxes. The prompt keeps the
+    /// shape because it is one line and the place the user acts.
     #[test]
-    fn a_rows_second_line_is_bubbles_too() {
+    fn a_rows_second_line_is_plain_text() {
         let dir = tempfile::tempdir().unwrap();
         let app = app_with(
             &dir,
@@ -1281,49 +1231,36 @@ mod tests {
                 RuntimeState::WaitingApproval,
             )],
         );
-        let v = app.rows().iter().find_map(|r| match r {
-            ListRow::Session(v) => Some(v.clone()),
-            _ => None,
-        });
-        let v = v.expect("a session row");
+        let v = app
+            .rows()
+            .iter()
+            .find_map(|r| match r {
+                ListRow::Session(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("a session row");
 
-        let line = meta_line(&v, 120, chrono::Utc::now(), false, Skin::Bubbles);
+        let line = meta_line(&v, 120, chrono::Utc::now(), false);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text.matches(bubbles::LEFT).count(), 3, "{text:?}");
-        assert!(text.contains(bubbles::FOLDER), "{text:?}");
-        assert!(text.contains("Claude") && text.contains("Needs approval"));
+        assert!(text.contains("Claude · Needs approval · api"), "{text:?}");
 
-        // Nothing in a row is filled. Four filled pills times every row on
-        // screen is a field of dark blocks on a light terminal; the prompt is
-        // one line and can afford it, the list cannot.
+        // No caps, no marks, no fill: nothing with an edge on it, and nothing
+        // that needs a font the terminal may not have.
+        assert!(
+            !text.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
+            "{text:?}"
+        );
         assert!(
             line.spans.iter().all(|s| s.style.bg.is_none()),
-            "a row must not be filled: {:?}",
+            "{:?}",
             line.spans
         );
-        // And because it is not filled, a state wears the terminal's own
-        // colour here, the same as its glyph on the line above.
-        let waiting = line
-            .spans
-            .iter()
-            .find(|s| s.content.contains("Needs approval"))
-            .expect("a state chip");
-        assert_eq!(waiting.style, state_style(v.state()), "{waiting:?}");
 
-        // The prompt, by contrast, keeps its fill.
+        // The prompt, by contrast, keeps the bubbles and their fill.
         let prompt = prompt_prefix(&app, 100, Skin::Bubbles);
         assert!(
             prompt.iter().any(|s| s.style.bg == Some(bubbles::FILL)),
             "{prompt:?}"
-        );
-
-        // The plain skin keeps the separated form, and no glyphs.
-        let plain = meta_line(&v, 120, chrono::Utc::now(), false, Skin::Plain);
-        let text: String = plain.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("Claude · Needs approval · api"), "{text:?}");
-        assert!(
-            !text.chars().any(|c| ('\u{e000}'..='\u{f8ff}').contains(&c)),
-            "{text:?}"
         );
     }
 

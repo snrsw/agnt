@@ -108,7 +108,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 
 **Colour is drawn from the terminal's own palette, and is always additive.** The list uses named ANSI colours only — amber for a session that needs you, green for one that is working, magenta for PR and issue references, blue for the brand mark, the cursor bar and the caret — so it wears whatever the terminal is themed with instead of fighting it. Every state still carries its glyph and its word, so a monochrome terminal loses only the emphasis. The cursor is a bar in the left margin rather than a reversed row: it marks every line of the selected card, and leaves the card's own colours readable.
 
-**The prompt's bubbles are the one place that departs from this**, and do so deliberately: they carry `bubblesextra`'s own hex colours, and a fixed fill forces fixed foregrounds with it. That is affordable once, on one line. It is not affordable on every row, which is why the list's badges are unfilled — and unfilled means a state can wear the terminal's own colour again, the same colour its glyph wears on the line above. `AGNT_STYLE=plain` returns everything to the rule.
+**The prompt's bubbles are the one place that departs from this**, and do so deliberately: they carry `bubblesextra`'s own hex colours, and a fixed fill forces fixed foregrounds with it. That is affordable once, on one line. It was not affordable on every row: the list wore the same badges for a while and they are gone. `AGNT_STYLE=plain` returns the prompt to the rule as well.
 
 **One language, everywhere.** A directory wears the same folder mark in the header, in the prompt and on every row. A state wears the same glyph on a row, in a group heading's tally and in the header's counts — which used to spell the counts out in words while the rest of the screen used marks. A branch wears the branch mark a shell prompt gives it rather than a slash, because a branch is not a path component. Each of these was already drawn somewhere; the work was drawing it the same way in the other places.
 
@@ -121,7 +121,7 @@ These are fictional examples. State is never conveyed by colour alone: every sta
 ```
   Needs you  1  ────────────────────────────────────────────────────
 > ● claude-code-action auth subscription                      issue #880
-     ◆ Claude   Needs input   󰉋 reed   34d
+    Claude · Needs input · reed · 34d
   ○ review pr #985
      ◆ Claude   Idle   󰉋 reed   1h 
 ──────────────────────────────────────────────────────────────────────────
@@ -158,9 +158,7 @@ Two earlier shapes were built and dropped. A separate four-line pane repeated th
 
 There is no caret. A `>` earns its place on a bare prompt by marking where the typing starts; a pill has a rounded edge that does the same job, so a caret after one is a second marker for a boundary already drawn. The path is the part that gives way on a narrow terminal — at most a third of the line — keeping the trailing components, which are the ones that identify the checkout. The agent and the caret are short and fixed.
 
-**A row's second line carries the same badges, without the fill**, so a row and the prompt read as one design rather than two: the agent, the state in words, where it is, and how long ago — the same four-piece sentence, in the same shape. The title line above it is untouched, because a pill around a title would box in the one thing that should read as plain text. The repository view is left alone as well: it is a table, its columns are what make it scannable, and pills do not tabulate.
-
-**The fill is what the list drops, and only the list.** The prompt is one line and the place the user acts, so it can carry a saturated block of colour. A row's second line is four of them, times every row on screen, and on a light terminal that is a field of dark blocks — the opposite of a list built to be scanned. Keeping the caps and dropping the fill keeps the shape and gives back the quiet, and it also gives back the colour rule: with nothing but the terminal's own background behind them, the badges need no fixed foreground, so a state wears the same colour here as its glyph does on the line above.
+**A row's second line is plain text**: the agent, the state in words, where it is, and how long ago, separated by middots. It carried the prompt's badges for a while — first filled, then with the fill dropped to quieten them — and both are reverted. A badge is an edge drawn around a field, and an edge per field times every row on screen turns a list into a grid of boxes. The prompt can afford the shape because it is one line and the place the user acts; a list is for scanning, and plain text with a separator scans better than anything with edges on it. The repository view was never changed for the same reason: it is a table, and its columns are what make it readable.
 
 **The bubbles are oh-my-posh's `bubblesextra`.** A rounded cap, the content on a fill, a rounded cap: `\ue0b6` and `\ue0b4` drawn in the fill colour against the terminal's own background, which is what makes a rectangle of background read as a pill. The palette is the theme's — `#29315A` fill, `#3EC669` for the path with its `\ue5ff` folder mark, and `#7FD5EA` for the agent. The reason to quote a prompt theme is that a user running it in their shell sees the same machine in both places; this project's author does.
 
