@@ -41,7 +41,6 @@ The prompt at the bottom is always live: type a task and press `Enter` to start 
 | `Ctrl+X` | Hide or restore the selected row |
 | `Ctrl+G` | Change its classification |
 | `Ctrl+L` | Link a PR or issue URL |
-| `Ctrl+U` / `Ctrl+W` | Clear the prompt / delete a word |
 | `Ctrl+C` | Quit |
 
 ### Shell mode

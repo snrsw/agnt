@@ -412,6 +412,13 @@ mod tests {
         std::fs::write(dir.join(name), body).unwrap();
     }
 
+    /// A rollout timestamp `d` days before now.
+    fn days_ago(d: i64) -> String {
+        (Utc::now() - chrono::Duration::days(d))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
     /// Shape captured from a real rollout file on 2026-09-16, codex-cli 0.154.0.
     fn meta_line(session_id: &str, cwd: &str, ts: &str, source: &str) -> String {
         format!(
@@ -553,38 +560,22 @@ mod tests {
     /// reader that silently drops rows cannot be told from one that failed.
     #[test]
     fn conversations_older_than_the_window_are_left_out_and_counted() {
-        let recent = Utc::now() - chrono::Duration::days(3);
-        let stale = Utc::now() - chrono::Duration::days(200);
-        let stamp = |t: DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let recent = days_ago(3);
+        let stale = days_ago(200);
 
         let home = home_with(
             &[
                 (
                     "rollout-recent.jsonl",
-                    meta_line(
-                        "11111111-1111-1111-1111-111111111111",
-                        "/a",
-                        &stamp(recent),
-                        "\"cli\"",
-                    ),
+                    meta_line("11111111-1111-1111-1111-111111111111", "/a", &recent, "\"cli\""),
                 ),
                 (
                     "rollout-old-a.jsonl",
-                    meta_line(
-                        "22222222-2222-2222-2222-222222222222",
-                        "/b",
-                        &stamp(stale),
-                        "\"cli\"",
-                    ),
+                    meta_line("22222222-2222-2222-2222-222222222222", "/b", &stale, "\"cli\""),
                 ),
                 (
                     "rollout-old-b.jsonl",
-                    meta_line(
-                        "33333333-3333-3333-3333-333333333333",
-                        "/c",
-                        &stamp(stale),
-                        "\"cli\"",
-                    ),
+                    meta_line("33333333-3333-3333-3333-333333333333", "/c", &stale, "\"cli\""),
                 ),
             ],
             None,
@@ -608,20 +599,15 @@ mod tests {
     #[test]
     fn a_thread_touched_recently_survives_an_old_first_rollout() {
         let id = "44444444-4444-4444-4444-444444444444";
-        let stamp = |d: i64| {
-            (Utc::now() - chrono::Duration::days(d))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
-        };
         let home = home_with(
             &[
                 (
                     "rollout-first.jsonl",
-                    meta_line(id, "/old", &stamp(200), "\"cli\""),
+                    meta_line(id, "/old", &days_ago(200), "\"cli\""),
                 ),
                 (
                     "rollout-latest.jsonl",
-                    meta_line(id, "/new", &stamp(2), "\"cli\""),
+                    meta_line(id, "/new", &days_ago(2), "\"cli\""),
                 ),
             ],
             None,
@@ -634,23 +620,23 @@ mod tests {
 
     #[tokio::test]
     async fn the_scope_note_says_what_was_left_out() {
-        let stamp = |d: i64| {
-            (Utc::now() - chrono::Duration::days(d))
-                .format("%Y-%m-%dT%H:%M:%SZ")
-                .to_string()
-        };
         let home = home_with(
             &[
                 (
                     "rollout-a.jsonl",
-                    meta_line("55555555-5555-5555-5555-555555555555", "/a", &stamp(1), "\"cli\""),
+                    meta_line(
+                        "55555555-5555-5555-5555-555555555555",
+                        "/a",
+                        &days_ago(1),
+                        "\"cli\"",
+                    ),
                 ),
                 (
                     "rollout-b.jsonl",
                     meta_line(
                         "66666666-6666-6666-6666-666666666666",
                         "/b",
-                        &stamp(300),
+                        &days_ago(300),
                         "\"cli\"",
                     ),
                 ),
@@ -727,14 +713,15 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_reads_the_configured_home() {
-        // Inside the history window, whenever the test runs.
-        let recent = (Utc::now() - chrono::Duration::days(1))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
         let home = home_with(
             &[(
                 "rollout-x.jsonl",
-                meta_line("55555555-5555-5555-5555-555555555555", "/w", &recent, "\"cli\""),
+                meta_line(
+                    "55555555-5555-5555-5555-555555555555",
+                    "/w",
+                    &days_ago(1),
+                    "\"cli\"",
+                ),
             )],
             None,
         );

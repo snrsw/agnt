@@ -2084,15 +2084,6 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
 
-        // Ctrl+T is a list action in task mode; in shell mode it is the
-        // shell's, so the view must not move.
-        let view = app.view;
-        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
-        assert_eq!(app.view, view);
-        // A shell without line editing (dash, Ubuntu's /bin/sh) keeps that
-        // ^T as a literal byte; Ctrl+U, the tty's kill character, clears it.
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-
         for c in "cd sub".chars() {
             app.handle_key(key(c));
         }
@@ -2116,6 +2107,13 @@ mod tests {
             app.new_session_cwd().canonicalize().unwrap(),
             sub.canonicalize().unwrap()
         );
+
+        // Ctrl+T is a list action in task mode; in shell mode it is the
+        // shell's, so the view must not move. Sent last: a shell without line
+        // editing (dash) keeps it as a literal byte in the next command.
+        let view = app.view;
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(app.view, view);
     }
 
     /// `exit` gives the text area back to the task prompt instead of leaving
