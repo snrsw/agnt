@@ -50,7 +50,7 @@ impl CacheStore {
     /// Save at most `max_rows` sessions, most recent activity first.
     pub fn save(&self, sessions: &[Session]) -> Result<(), StorageError> {
         let mut rows: Vec<Session> = sessions.to_vec();
-        rows.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+        rows.sort_by_key(|s| std::cmp::Reverse(s.last_activity_at));
         rows.truncate(self.max_rows);
         let file = CacheFile {
             schema_version: Self::SCHEMA_VERSION,

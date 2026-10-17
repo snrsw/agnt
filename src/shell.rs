@@ -748,7 +748,7 @@ mod tests {
         let mut r = QueryResponder::default();
         // APC, PM and SOS end with ST like DCS and OSC do. Treating them as
         // two bytes would leave their payload to be scanned as output.
-        for opener in [b'_', b'^', b'X'] {
+        for opener in *b"_^X" {
             let mut seq = vec![0x1b, opener];
             seq.extend_from_slice(b"\x1b[0c pretending to be a query");
             seq.extend_from_slice(b"\x1b\\");

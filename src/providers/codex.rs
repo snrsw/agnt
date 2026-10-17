@@ -727,15 +727,14 @@ mod tests {
 
     #[tokio::test]
     async fn discovery_reads_the_configured_home() {
+        // Inside the history window, whenever the test runs.
+        let recent = (Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
         let home = home_with(
             &[(
                 "rollout-x.jsonl",
-                meta_line(
-                    "55555555-5555-5555-5555-555555555555",
-                    "/w",
-                    "2026-09-16T10:00:00Z",
-                    "\"cli\"",
-                ),
+                meta_line("55555555-5555-5555-5555-555555555555", "/w", &recent, "\"cli\""),
             )],
             None,
         );

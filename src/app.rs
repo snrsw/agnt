@@ -2089,6 +2089,9 @@ mod tests {
         let view = app.view;
         app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert_eq!(app.view, view);
+        // A shell without line editing (dash, Ubuntu's /bin/sh) keeps that
+        // ^T as a literal byte; Ctrl+U, the tty's kill character, clears it.
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
 
         for c in "cd sub".chars() {
             app.handle_key(key(c));
