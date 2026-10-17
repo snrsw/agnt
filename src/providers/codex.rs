@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use super::process::{find_in_path, version_of};
+use super::process::{find_in_path, run, version_of};
 use super::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
@@ -37,6 +37,7 @@ pub const APP_SERVER_REASON: &str =
     "needs the Codex App Server protocol; record V4/V6 in docs/p0-validation.md first";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How far back the history reader looks.
 ///
@@ -310,6 +311,7 @@ impl Adapter for CodexAdapter {
             attach: Support::unsupported(APP_SERVER_REASON),
             resume: Support::Supported,
             stop: Support::unsupported(APP_SERVER_REASON),
+            delete: Support::Supported,
         }
     }
 
@@ -400,6 +402,20 @@ impl Adapter for CodexAdapter {
 
     async fn stop(&self, _key: &SessionKey) -> Result<StopResult, AdapterError> {
         Err(self.unsupported(Operation::Stop, APP_SERVER_REASON))
+    }
+
+    /// `--force` skips Codex's own prompt: agnt has already asked, and the
+    /// CLI runs with no terminal to ask on.
+    async fn delete(&self, key: &SessionKey) -> Result<(), AdapterError> {
+        let bin = self.bin(Operation::Delete)?;
+        run(
+            bin,
+            &["delete", "--force", &key.native_session_id],
+            None,
+            DELETE_TIMEOUT,
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -709,6 +725,26 @@ mod tests {
         // Never a silent success: both report why.
         assert!(a.attach(&key).await.unwrap_err().is_unsupported());
         assert!(a.stop(&key).await.unwrap_err().is_unsupported());
+    }
+
+    #[tokio::test]
+    async fn delete_passes_the_uuid_and_skips_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let fake = dir.path().join("codex");
+        std::fs::write(&fake, format!("#!/bin/sh\necho \"$@\" > {}\n", log.display())).unwrap();
+        let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake, perms).unwrap();
+
+        let a = CodexAdapter::with_binary(&fake);
+        assert!(a.capabilities().await.delete.is_supported());
+        let id = "01a07697-25db-7b01-ad8b-1aa4ce86c953";
+        a.delete(&SessionKey::new(Provider::Codex, id)).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().trim(),
+            format!("delete --force {id}")
+        );
     }
 
     #[tokio::test]

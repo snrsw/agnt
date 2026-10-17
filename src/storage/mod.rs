@@ -10,6 +10,19 @@ pub use cache::{CacheFile, CacheStore};
 pub use metadata::{MetadataFile, MetadataStore, SCHEMA_VERSION};
 pub use paths::Paths;
 
+use crate::model::SessionKey;
+
+/// After a provider deleted a session: drop what agnt kept about it, so the
+/// cache does not bring the row back before the next discovery.
+pub fn forget(metadata: &MetadataStore, cache: &CacheStore, key: &SessionKey) -> Result<(), StorageError> {
+    metadata.update(|m| m.remove(key))?;
+    if let Some(file) = cache.load() {
+        let rest: Vec<_> = file.sessions.into_iter().filter(|s| &s.key != key).collect();
+        cache.save(&rest)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("I/O error at {path}: {source}")]

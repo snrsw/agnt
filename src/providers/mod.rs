@@ -142,6 +142,9 @@ pub trait Adapter: Send + Sync {
     async fn resume(&self, key: &SessionKey) -> Result<AttachPlan, AdapterError>;
 
     async fn stop(&self, key: &SessionKey) -> Result<StopResult, AdapterError>;
+
+    /// Permanently delete a saved session through the provider's own CLI.
+    async fn delete(&self, key: &SessionKey) -> Result<(), AdapterError>;
 }
 
 pub fn all() -> Vec<Arc<dyn Adapter>> {

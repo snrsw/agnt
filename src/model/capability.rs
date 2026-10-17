@@ -10,10 +10,11 @@ pub enum Operation {
     Attach,
     Resume,
     Stop,
+    Delete,
 }
 
 impl Operation {
-    pub const ALL: [Operation; 7] = [
+    pub const ALL: [Operation; 8] = [
         Operation::Discover,
         Operation::Observe,
         Operation::Preview,
@@ -21,6 +22,7 @@ impl Operation {
         Operation::Attach,
         Operation::Resume,
         Operation::Stop,
+        Operation::Delete,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -32,6 +34,7 @@ impl Operation {
             Operation::Attach => "attach",
             Operation::Resume => "resume",
             Operation::Stop => "stop",
+            Operation::Delete => "delete",
         }
     }
 }
@@ -67,6 +70,7 @@ pub struct Capabilities {
     pub attach: Support,
     pub resume: Support,
     pub stop: Support,
+    pub delete: Support,
 }
 
 impl Capabilities {
@@ -80,7 +84,8 @@ impl Capabilities {
             start: Support::unsupported(reason.clone()),
             attach: Support::unsupported(reason.clone()),
             resume: Support::unsupported(reason.clone()),
-            stop: Support::unsupported(reason),
+            stop: Support::unsupported(reason.clone()),
+            delete: Support::unsupported(reason),
         }
     }
 
@@ -93,6 +98,7 @@ impl Capabilities {
             Operation::Attach => &self.attach,
             Operation::Resume => &self.resume,
             Operation::Stop => &self.stop,
+            Operation::Delete => &self.delete,
         }
     }
 }
