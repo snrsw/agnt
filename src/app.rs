@@ -1004,7 +1004,7 @@ impl App {
             }
 
             // Editing the prompt.
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !self.draft.buffer.is_empty() => {
                 self.draft.buffer.pop();
             }
             KeyCode::Char('u') if ctrl => self.draft.buffer.clear(),
@@ -1030,7 +1030,9 @@ impl App {
                 self.show_hidden = !self.show_hidden;
                 self.ensure_selection();
             }
-            KeyCode::Delete => {
+            // The Mac key labelled "delete" sends Backspace, so on an empty
+            // prompt Backspace is delete too. The dialog still asks first.
+            KeyCode::Delete | KeyCode::Backspace => {
                 if let Some(v) = self.selected_view() {
                     let k = v.session.key.clone();
                     self.mode = if v.state().is_live() {
@@ -1653,8 +1655,19 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
 
         app.handle_key(code(KeyCode::Delete));
-        assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Delete(k)]);
+        assert_eq!(
+            app.handle_key(code(KeyCode::Enter)),
+            vec![Effect::Delete(k.clone())]
+        );
         assert_eq!(app.mode, Mode::Normal);
+
+        // Backspace edits a prompt with text in it, and deletes on an empty one.
+        app.handle_key(key('a'));
+        app.handle_key(code(KeyCode::Backspace));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.draft.buffer.is_empty());
+        app.handle_key(code(KeyCode::Backspace));
+        assert_eq!(app.mode, Mode::DeleteDialog { key: k });
     }
 
     #[test]
