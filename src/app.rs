@@ -86,13 +86,11 @@ pub enum Mode {
         key: SessionKey,
         live: bool,
     },
-    /// Delete on a row: permanent, so it asks first.
+    /// Delete on a row: permanent, so it asks first. `live` says the
+    /// session will be stopped before it is deleted.
     DeleteDialog {
         key: SessionKey,
-    },
-    /// Ctrl+S on a live row: ends work in progress, so it asks first.
-    StopDialog {
-        key: SessionKey,
+        live: bool,
     },
     /// Enter on a row whose state does not decide attach vs. resume.
     ChooseAction {
@@ -907,20 +905,10 @@ impl App {
                 }
                 _ => Vec::new(),
             },
-            Mode::DeleteDialog { key: target } => {
+            Mode::DeleteDialog { key: target, .. } => {
                 self.mode = Mode::Normal;
                 match key.code {
                     KeyCode::Enter => vec![Effect::Delete(target)],
-                    _ => Vec::new(),
-                }
-            }
-            Mode::StopDialog { key: target } => {
-                self.mode = Mode::Normal;
-                match key.code {
-                    KeyCode::Enter => vec![Effect::Stop {
-                        key: target,
-                        then_hide: false,
-                    }],
                     _ => Vec::new(),
                 }
             }
@@ -1047,21 +1035,9 @@ impl App {
             // prompt Backspace is delete too. The dialog still asks first.
             KeyCode::Delete | KeyCode::Backspace => {
                 if let Some(v) = self.selected_view() {
-                    let k = v.session.key.clone();
-                    self.mode = if v.state().is_live() {
-                        Mode::Message("It is running. Stop it first with ctrl+s, then delete.".into())
-                    } else {
-                        Mode::DeleteDialog { key: k }
-                    };
-                }
-            }
-            KeyCode::Char('s') if ctrl => {
-                if let Some(v) = self.selected_view() {
-                    let k = v.session.key.clone();
-                    self.mode = if v.state().is_live() {
-                        Mode::StopDialog { key: k }
-                    } else {
-                        Mode::Message("It is not running.".into())
+                    self.mode = Mode::DeleteDialog {
+                        key: v.session.key.clone(),
+                        live: v.state().is_live(),
                     };
                 }
             }
@@ -1673,7 +1649,13 @@ mod tests {
 
         // Esc, or any other key, backs out.
         app.handle_key(code(KeyCode::Delete));
-        assert_eq!(app.mode, Mode::DeleteDialog { key: k.clone() });
+        assert_eq!(
+            app.mode,
+            Mode::DeleteDialog {
+                key: k.clone(),
+                live: false
+            }
+        );
         assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
         assert_eq!(app.mode, Mode::Normal);
 
@@ -1690,11 +1672,11 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.draft.buffer.is_empty());
         app.handle_key(code(KeyCode::Backspace));
-        assert_eq!(app.mode, Mode::DeleteDialog { key: k });
+        assert_eq!(app.mode, Mode::DeleteDialog { key: k, live: false });
     }
 
     #[test]
-    fn a_running_session_is_not_offered_for_delete() {
+    fn a_running_session_is_stopped_then_deleted_with_the_same_keys() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.apply_discovery(
@@ -1704,30 +1686,24 @@ mod tests {
                 true,
             )),
         );
-        app.handle_key(code(KeyCode::Delete));
-        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("ctrl+s")));
-        assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
-
-        // Ctrl+S asks, and Enter stops it without hiding the row.
+        // Delete, then Enter: no separate stop step. The adapter stops it.
         let k = SessionKey::new(Provider::Claude, "a");
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(app.mode, Mode::StopDialog { key: k.clone() });
-        assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
-        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        app.handle_key(code(KeyCode::Delete));
+        assert_eq!(
+            app.mode,
+            Mode::DeleteDialog {
+                key: k.clone(),
+                live: true
+            }
+        );
         assert_eq!(
             app.handle_key(code(KeyCode::Enter)),
-            vec![Effect::Stop {
-                key: k.clone(),
-                then_hide: false
-            }]
+            vec![Effect::Delete(k.clone())]
         );
 
-        // Stopped, the row is history, but it stays under the cursor so the
-        // next key can delete it.
+        // A stopped row is history, but it stays under the cursor.
         app.apply_stopped(k.clone(), false, Ok(StopResult::Confirmed));
-        assert_eq!(app.selected, Some(k.clone()));
-        app.handle_key(code(KeyCode::Delete));
-        assert_eq!(app.mode, Mode::DeleteDialog { key: k });
+        assert_eq!(app.selected, Some(k));
     }
 
     #[test]

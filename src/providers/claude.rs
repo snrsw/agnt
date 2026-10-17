@@ -370,18 +370,15 @@ impl Adapter for ClaudeAdapter {
         Ok(StopResult::Confirmed)
     }
 
-    /// `claude rm` also removes the session's worktree, and refuses when that
-    /// would lose unpushed commits. agnt never passes the flags that override
-    /// the refusal; Claude's message is shown instead.
+    /// A session still in the active listing is stopped first, so delete is
+    /// one gesture whatever the state. `claude rm` also removes the session's
+    /// worktree, and refuses when that would lose unpushed commits. agnt never
+    /// passes the flags that override the refusal; Claude's message is shown.
     async fn delete(&self, key: &SessionKey) -> Result<(), AdapterError> {
         let bin = self.bin(Operation::Delete)?;
         let entry = self.entry_for(key, Operation::Delete).await?;
-        if entry.runtime_state(false).is_live() {
-            return Err(AdapterError::Unsupported {
-                provider: Provider::Claude,
-                operation: Operation::Delete,
-                reason: "it is running; stop it first".into(),
-            });
+        if self.list(false).await?.iter().any(|e| e.id == entry.id) {
+            run(bin, &["stop", &entry.id], None, STOP_TIMEOUT).await?;
         }
         run(bin, &["rm", &entry.id], None, DELETE_TIMEOUT).await?;
         Ok(())
@@ -495,12 +492,18 @@ mod tests {
         assert_eq!(sessions.len(), 3);
     }
 
-    /// A fake `claude` that lists `SAMPLE` and records what `rm` was given.
+    /// A fake `claude`: `SAMPLE` is active, `COMPLETED` only shows with
+    /// `--all`, and every other command is recorded.
     fn fake_claude(dir: &Path) -> (ClaudeAdapter, PathBuf) {
-        let log = dir.join("rm-args");
+        let log = dir.join("calls");
         let bin = dir.join("claude");
+        let all = format!(
+            "{},{}",
+            SAMPLE.trim().trim_end_matches(']'),
+            COMPLETED.trim().trim_start_matches('[')
+        );
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = agents ]; then cat <<'EOF'\n{SAMPLE}\nEOF\nelse echo \"$@\" > {}; fi\n",
+            "#!/bin/sh\nif [ \"$1\" = agents ]; then\n  if [ \"$3\" = --all ]; then cat <<'EOF'\n{all}\nEOF\n  else cat <<'EOF'\n{SAMPLE}\nEOF\n  fi\nelse echo \"$@\" >> {}; fi\n",
             log.display()
         );
         std::fs::write(&bin, script).unwrap();
@@ -511,17 +514,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_refuses_a_running_session_and_removes_a_finished_one() {
+    async fn delete_stops_an_active_session_first_and_removes_a_finished_one() {
         let dir = tempfile::tempdir().unwrap();
         let (a, log) = fake_claude(dir.path());
 
-        let blocked = SessionKey::new(Provider::Claude, "5175105c-ec25-4624-a2f9-9addbe8d6ec3");
-        assert!(a.delete(&blocked).await.unwrap_err().is_unsupported());
-        assert!(!log.exists());
+        let active = SessionKey::new(Provider::Claude, "5175105c-ec25-4624-a2f9-9addbe8d6ec3");
+        a.delete(&active).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "stop 5175105c\nrm 5175105c\n"
+        );
 
-        let done = SessionKey::new(Provider::Claude, "450b4952-286f-4761-a89b-33d40a4fad2e");
-        a.delete(&done).await.unwrap();
-        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "rm 450b4952");
+        std::fs::remove_file(&log).unwrap();
+        let finished = SessionKey::new(Provider::Claude, "98f57e7a-80ed-4212-b681-88cd88424c6c");
+        a.delete(&finished).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "rm 98f57e7a\n");
     }
 
     #[tokio::test]
