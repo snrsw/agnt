@@ -38,6 +38,7 @@ The prompt at the bottom is always live: type a task and press `Enter` to start 
 | `Ctrl+O` | Show stopped sessions and saved history |
 | `Ctrl+Y` | Show hidden rows |
 | `Ctrl+R` | Refresh |
+| `Ctrl+S` | Stop the selected session (Enter confirms) |
 | `Ctrl+X` | Hide or restore the selected row |
 | `Delete` / `Backspace` on an empty prompt | Delete the selected session for good (Enter confirms) |
 | `Ctrl+G` | Change its classification |

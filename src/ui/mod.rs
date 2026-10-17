@@ -888,6 +888,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "ctrl+y          show hidden rows".into(),
                 "ctrl+r          refresh".into(),
                 "".into(),
+                "ctrl+s          stop the selected session (asks first)".into(),
                 "ctrl+x          hide the selected row, or restore it".into(),
                 "delete / bksp   on an empty prompt: delete the selected session for good (asks first)".into(),
                 "ctrl+g          change its classification".into(),
@@ -923,6 +924,14 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
             }
             ("Hide", lines)
         }
+        Mode::StopDialog { key } => (
+            "Stop",
+            vec![
+                format!("target: {}", key.qualified()),
+                "Ends the running session. The conversation stays and can be resumed.".into(),
+                "Enter: stop   Esc: back".into(),
+            ],
+        ),
         Mode::DeleteDialog { key } => (
             "Delete",
             vec![

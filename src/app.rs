@@ -90,6 +90,10 @@ pub enum Mode {
     DeleteDialog {
         key: SessionKey,
     },
+    /// Ctrl+S on a live row: ends work in progress, so it asks first.
+    StopDialog {
+        key: SessionKey,
+    },
     /// Enter on a row whose state does not decide attach vs. resume.
     ChooseAction {
         key: SessionKey,
@@ -366,11 +370,7 @@ impl App {
             // The heading tallies every member, folded or not, so a collapsed
             // group still says how much is inside it.
             let mut header = GroupHeader::tally(label, &members);
-            let shown: Vec<SessionView> = if self.show_history {
-                members
-            } else {
-                members.into_iter().filter(|v| !v.is_history()).collect()
-            };
+            let shown: Vec<SessionView> = members.into_iter().filter(|v| !self.is_folded(v)).collect();
             header.collapsed = shown.is_empty();
             rows.push(ListRow::Group(header));
             rows.extend(shown.into_iter().map(|v| ListRow::Session(Box::new(v))));
@@ -393,7 +393,7 @@ impl App {
             if !self.show_hidden && v.is_hidden() {
                 continue;
             }
-            if v.is_history() && !self.show_history {
+            if self.is_folded(&v) {
                 folded += 1;
                 continue;
             }
@@ -411,6 +411,13 @@ impl App {
     }
 
     /// Sessions currently listed, and how many are folded away behind `z`.
+    /// History is folded away unless asked for, except the row under the
+    /// cursor: stopping a session must not take it out from under the next
+    /// key, which is usually delete.
+    fn is_folded(&self, v: &SessionView) -> bool {
+        !self.show_history && v.is_history() && self.selected.as_ref() != Some(&v.session.key)
+    }
+
     pub fn shown_and_folded(&self) -> (usize, usize) {
         let visible: Vec<SessionView> = self
             .views()
@@ -418,11 +425,7 @@ impl App {
             .filter(|v| self.show_hidden || !v.is_hidden())
             .filter(|v| v.matches_query(&self.query))
             .collect();
-        let folded = if self.show_history {
-            0
-        } else {
-            visible.iter().filter(|v| v.is_history()).count()
-        };
+        let folded = visible.iter().filter(|v| self.is_folded(v)).count();
         (visible.len() - folded, folded)
     }
 
@@ -911,6 +914,16 @@ impl App {
                     _ => Vec::new(),
                 }
             }
+            Mode::StopDialog { key: target } => {
+                self.mode = Mode::Normal;
+                match key.code {
+                    KeyCode::Enter => vec![Effect::Stop {
+                        key: target,
+                        then_hide: false,
+                    }],
+                    _ => Vec::new(),
+                }
+            }
             Mode::ChooseAction { key: target } => match key.code {
                 KeyCode::Char('a') => {
                     self.mode = Mode::Normal;
@@ -1036,9 +1049,19 @@ impl App {
                 if let Some(v) = self.selected_view() {
                     let k = v.session.key.clone();
                     self.mode = if v.state().is_live() {
-                        Mode::Message("It is running. Stop it first (ctrl+x, then s), then delete.".into())
+                        Mode::Message("It is running. Stop it first with ctrl+s, then delete.".into())
                     } else {
                         Mode::DeleteDialog { key: k }
+                    };
+                }
+            }
+            KeyCode::Char('s') if ctrl => {
+                if let Some(v) = self.selected_view() {
+                    let k = v.session.key.clone();
+                    self.mode = if v.state().is_live() {
+                        Mode::StopDialog { key: k }
+                    } else {
+                        Mode::Message("It is not running.".into())
                     };
                 }
             }
@@ -1682,8 +1705,29 @@ mod tests {
             )),
         );
         app.handle_key(code(KeyCode::Delete));
-        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("Stop it first")));
+        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("ctrl+s")));
         assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
+
+        // Ctrl+S asks, and Enter stops it without hiding the row.
+        let k = SessionKey::new(Provider::Claude, "a");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::StopDialog { key: k.clone() });
+        assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.handle_key(code(KeyCode::Enter)),
+            vec![Effect::Stop {
+                key: k.clone(),
+                then_hide: false
+            }]
+        );
+
+        // Stopped, the row is history, but it stays under the cursor so the
+        // next key can delete it.
+        app.apply_stopped(k.clone(), false, Ok(StopResult::Confirmed));
+        assert_eq!(app.selected, Some(k.clone()));
+        app.handle_key(code(KeyCode::Delete));
+        assert_eq!(app.mode, Mode::DeleteDialog { key: k });
     }
 
     #[test]
