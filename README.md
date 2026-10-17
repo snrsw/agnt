@@ -39,7 +39,7 @@ The prompt at the bottom is always live: type a task and press `Enter` to start 
 | `Ctrl+Y` | Show hidden rows |
 | `Ctrl+R` | Refresh |
 | `Ctrl+X` | Hide or restore the selected row |
-| `Delete` | Delete the selected session for good (Enter confirms) |
+| `Delete` / `Backspace` on an empty prompt | Delete the selected session for good, stopping it first if it runs (Enter confirms) |
 | `Ctrl+G` | Change its classification |
 | `Ctrl+L` | Link a PR or issue URL |
 | `Ctrl+C` | Quit |

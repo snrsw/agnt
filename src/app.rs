@@ -86,9 +86,11 @@ pub enum Mode {
         key: SessionKey,
         live: bool,
     },
-    /// Delete on a row: permanent, so it asks first.
+    /// Delete on a row: permanent, so it asks first. `live` says the
+    /// session will be stopped before it is deleted.
     DeleteDialog {
         key: SessionKey,
+        live: bool,
     },
     /// Enter on a row whose state does not decide attach vs. resume.
     ChooseAction {
@@ -366,11 +368,7 @@ impl App {
             // The heading tallies every member, folded or not, so a collapsed
             // group still says how much is inside it.
             let mut header = GroupHeader::tally(label, &members);
-            let shown: Vec<SessionView> = if self.show_history {
-                members
-            } else {
-                members.into_iter().filter(|v| !v.is_history()).collect()
-            };
+            let shown: Vec<SessionView> = members.into_iter().filter(|v| !self.is_folded(v)).collect();
             header.collapsed = shown.is_empty();
             rows.push(ListRow::Group(header));
             rows.extend(shown.into_iter().map(|v| ListRow::Session(Box::new(v))));
@@ -393,7 +391,7 @@ impl App {
             if !self.show_hidden && v.is_hidden() {
                 continue;
             }
-            if v.is_history() && !self.show_history {
+            if self.is_folded(&v) {
                 folded += 1;
                 continue;
             }
@@ -411,6 +409,13 @@ impl App {
     }
 
     /// Sessions currently listed, and how many are folded away behind `z`.
+    /// History is folded away unless asked for, except the row under the
+    /// cursor: stopping a session must not take it out from under the next
+    /// key, which is usually delete.
+    fn is_folded(&self, v: &SessionView) -> bool {
+        !self.show_history && v.is_history() && self.selected.as_ref() != Some(&v.session.key)
+    }
+
     pub fn shown_and_folded(&self) -> (usize, usize) {
         let visible: Vec<SessionView> = self
             .views()
@@ -418,11 +423,7 @@ impl App {
             .filter(|v| self.show_hidden || !v.is_hidden())
             .filter(|v| v.matches_query(&self.query))
             .collect();
-        let folded = if self.show_history {
-            0
-        } else {
-            visible.iter().filter(|v| v.is_history()).count()
-        };
+        let folded = visible.iter().filter(|v| self.is_folded(v)).count();
         (visible.len() - folded, folded)
     }
 
@@ -904,7 +905,7 @@ impl App {
                 }
                 _ => Vec::new(),
             },
-            Mode::DeleteDialog { key: target } => {
+            Mode::DeleteDialog { key: target, .. } => {
                 self.mode = Mode::Normal;
                 match key.code {
                     KeyCode::Enter => vec![Effect::Delete(target)],
@@ -1004,7 +1005,7 @@ impl App {
             }
 
             // Editing the prompt.
-            KeyCode::Backspace => {
+            KeyCode::Backspace if !self.draft.buffer.is_empty() => {
                 self.draft.buffer.pop();
             }
             KeyCode::Char('u') if ctrl => self.draft.buffer.clear(),
@@ -1030,13 +1031,13 @@ impl App {
                 self.show_hidden = !self.show_hidden;
                 self.ensure_selection();
             }
-            KeyCode::Delete => {
+            // The Mac key labelled "delete" sends Backspace, so on an empty
+            // prompt Backspace is delete too. The dialog still asks first.
+            KeyCode::Delete | KeyCode::Backspace => {
                 if let Some(v) = self.selected_view() {
-                    let k = v.session.key.clone();
-                    self.mode = if v.state().is_live() {
-                        Mode::Message("It is running. Stop it first (ctrl+x, then s), then delete.".into())
-                    } else {
-                        Mode::DeleteDialog { key: k }
+                    self.mode = Mode::DeleteDialog {
+                        key: v.session.key.clone(),
+                        live: v.state().is_live(),
                     };
                 }
             }
@@ -1648,17 +1649,34 @@ mod tests {
 
         // Esc, or any other key, backs out.
         app.handle_key(code(KeyCode::Delete));
-        assert_eq!(app.mode, Mode::DeleteDialog { key: k.clone() });
+        assert_eq!(
+            app.mode,
+            Mode::DeleteDialog {
+                key: k.clone(),
+                live: false
+            }
+        );
         assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
         assert_eq!(app.mode, Mode::Normal);
 
         app.handle_key(code(KeyCode::Delete));
-        assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Delete(k)]);
+        assert_eq!(
+            app.handle_key(code(KeyCode::Enter)),
+            vec![Effect::Delete(k.clone())]
+        );
         assert_eq!(app.mode, Mode::Normal);
+
+        // Backspace edits a prompt with text in it, and deletes on an empty one.
+        app.handle_key(key('a'));
+        app.handle_key(code(KeyCode::Backspace));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.draft.buffer.is_empty());
+        app.handle_key(code(KeyCode::Backspace));
+        assert_eq!(app.mode, Mode::DeleteDialog { key: k, live: false });
     }
 
     #[test]
-    fn a_running_session_is_not_offered_for_delete() {
+    fn a_running_session_is_stopped_then_deleted_with_the_same_keys() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(&dir, vec![]);
         app.apply_discovery(
@@ -1668,9 +1686,24 @@ mod tests {
                 true,
             )),
         );
+        // Delete, then Enter: no separate stop step. The adapter stops it.
+        let k = SessionKey::new(Provider::Claude, "a");
         app.handle_key(code(KeyCode::Delete));
-        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("Stop it first")));
-        assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            app.mode,
+            Mode::DeleteDialog {
+                key: k.clone(),
+                live: true
+            }
+        );
+        assert_eq!(
+            app.handle_key(code(KeyCode::Enter)),
+            vec![Effect::Delete(k.clone())]
+        );
+
+        // A stopped row is history, but it stays under the cursor.
+        app.apply_stopped(k.clone(), false, Ok(StopResult::Confirmed));
+        assert_eq!(app.selected, Some(k));
     }
 
     #[test]
