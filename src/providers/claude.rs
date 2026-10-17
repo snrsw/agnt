@@ -28,6 +28,7 @@ use crate::model::{
     Capabilities, Operation, Origin, Provider, Runtime, RuntimeHandle, RuntimeState, Session, SessionKey,
     Support, text,
 };
+use crate::transcript::{self, Transcript};
 
 pub const BINARY: &str = "claude";
 
@@ -297,6 +298,23 @@ impl Adapter for ClaudeAdapter {
             operation: Operation::Preview,
             reason: PREVIEW_REASON.to_string(),
         })
+    }
+
+    async fn conversation(
+        &self,
+        key: &SessionKey,
+        max_turns: usize,
+    ) -> Result<Option<Transcript>, AdapterError> {
+        let Some(home) = transcript::default_claude_home() else {
+            return Ok(None);
+        };
+        let id = key.native_session_id.clone();
+        let read = tokio::task::spawn_blocking(move || match transcript::find_claude(&home, &id) {
+            Some(path) => transcript::read_file(&path, transcript::parse_claude).map(Some),
+            None => Ok(None),
+        });
+        let t = read.await.map_err(std::io::Error::other)??;
+        Ok(t.map(|t| t.tail(max_turns)))
     }
 
     async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError> {

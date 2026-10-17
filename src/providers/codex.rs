@@ -29,6 +29,7 @@ use super::{
 use crate::model::{
     Capabilities, Operation, Origin, Provider, Runtime, RuntimeState, Session, SessionKey, Support, text,
 };
+use crate::transcript::{self, Transcript};
 
 pub const BINARY: &str = "codex";
 
@@ -274,6 +275,17 @@ fn rollout_files(sessions: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The newest non-subagent rollout of a thread. A thread forked or resumed
+/// has several; the newest holds the turns most recently added.
+fn rollout_for(home: &Path, thread_id: &str) -> Option<PathBuf> {
+    rollout_files(&home.join("sessions"))
+        .into_iter()
+        .filter_map(|p| read_session_meta(&p).map(|m| (p, m)))
+        .filter(|(_, m)| !m.is_subagent() && m.thread_id() == Some(thread_id))
+        .max_by_key(|(_, m)| m.timestamp)
+        .map(|(p, _)| p)
+}
+
 fn read_session_meta(path: &Path) -> Option<SessionMeta> {
     use std::io::{BufRead, BufReader};
     let file = std::fs::File::open(path).ok()?;
@@ -371,6 +383,23 @@ impl Adapter for CodexAdapter {
     /// Codex only starts interactively, so the terminal is handed to it and
     /// the new conversation is picked up by the next discovery. No identity is
     /// invented in the meantime.
+    async fn conversation(
+        &self,
+        key: &SessionKey,
+        max_turns: usize,
+    ) -> Result<Option<Transcript>, AdapterError> {
+        let Some(home) = self.home.clone() else {
+            return Ok(None);
+        };
+        let id = key.native_session_id.clone();
+        let read = tokio::task::spawn_blocking(move || match rollout_for(&home, &id) {
+            Some(path) => transcript::read_file(&path, transcript::parse_codex).map(Some),
+            None => Ok(None),
+        });
+        let t = read.await.map_err(std::io::Error::other)??;
+        Ok(t.map(|t| t.tail(max_turns)))
+    }
+
     async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError> {
         let bin = self.bin(Operation::Start)?;
         let mut args = Vec::new();

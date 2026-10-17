@@ -22,6 +22,7 @@ use crate::providers::{
 use crate::shell::{self, PtyShell};
 use crate::storage::{self, CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
+use crate::transcript::Transcript;
 use crate::ui;
 
 /// Results of background work, delivered to the event loop.
@@ -39,6 +40,10 @@ pub enum AppEvent {
     Previewed {
         key: SessionKey,
         result: Result<Option<String>, AdapterError>,
+    },
+    Conversed {
+        key: SessionKey,
+        result: Result<Option<Transcript>, AdapterError>,
     },
     Started {
         provider: Provider,
@@ -58,6 +63,22 @@ pub enum AppEvent {
     /// itself lives behind the shell's own lock, and this only says "redraw".
     ShellDrew,
 }
+
+/// What the conversation panel has for one session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Conversation {
+    Loading,
+    Loaded(Transcript),
+    /// No transcript file was found for the session.
+    Missing,
+    Failed(String),
+}
+
+/// How many turns the panel keeps; more than fit, so a tall terminal is full.
+pub const CONVERSATION_TURNS: usize = 40;
+
+/// How often a live session's transcript is read again.
+const CONVERSATION_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatus {
@@ -216,6 +237,11 @@ pub struct App {
     /// Keys a preview has already been requested for, so a slow or empty
     /// answer is not asked for again on every redraw.
     preview_requested: BTreeSet<SessionKey>,
+    /// Transcripts for the conversation panel, by session.
+    pub conversations: BTreeMap<SessionKey, Conversation>,
+    /// The session whose transcript was last asked for, and when, so the
+    /// panel re-reads a live session on a timer and anything else once.
+    conversation_asked: Option<(SessionKey, std::time::Instant)>,
     /// The new-session prompt, always live. Typing goes here in task mode.
     pub draft: NewSession,
     /// Whether the text area is taking a task or a `cd`.
@@ -268,6 +294,8 @@ impl App {
             cache_saved_at,
             should_quit: false,
             preview_requested: BTreeSet::new(),
+            conversations: BTreeMap::new(),
+            conversation_asked: None,
             draft: NewSession::new(Provider::Claude),
             input_mode: InputMode::default(),
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -797,6 +825,24 @@ impl App {
         Some(key)
     }
 
+    /// The selected session's key when its transcript should be read: on
+    /// first selection, and again every couple of seconds while it is live.
+    pub fn take_conversation_request(&mut self) -> Option<SessionKey> {
+        let key = self.selected.clone()?;
+        let live = self.sessions.get(&key)?.runtime.state.is_live();
+        if let Some((asked, at)) = &self.conversation_asked
+            && *asked == key
+            && (!live || at.elapsed() < CONVERSATION_REFRESH)
+        {
+            return None;
+        }
+        self.conversation_asked = Some((key.clone(), std::time::Instant::now()));
+        self.conversations
+            .entry(key.clone())
+            .or_insert(Conversation::Loading);
+        Some(key)
+    }
+
     pub fn save_cache(&self) -> Result<(), crate::storage::StorageError> {
         let rows: Vec<Session> = self.sessions.values().cloned().collect();
         self.cache.save(&rows)
@@ -1155,6 +1201,22 @@ impl App {
                     s.preview = Some(text);
                 }
             }
+            AppEvent::Conversed { key, result } => {
+                let state = match result {
+                    Ok(Some(t)) => {
+                        // The last reply doubles as the row's one-line excerpt.
+                        if let Some(text) = t.last_assistant()
+                            && let Some(s) = self.sessions.get_mut(&key)
+                        {
+                            s.preview = Some(text.to_string());
+                        }
+                        Conversation::Loaded(t)
+                    }
+                    Ok(None) => Conversation::Missing,
+                    Err(e) => Conversation::Failed(e.to_string()),
+                };
+                self.conversations.insert(key, state);
+            }
             AppEvent::Started {
                 provider,
                 cwd,
@@ -1303,6 +1365,8 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
     start_shell(&mut app, &mut guard, &ev_tx)?;
 
     let mut effects: Vec<Effect> = Vec::new();
+    let mut tick = tokio::time::interval(CONVERSATION_REFRESH);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         // Both of these are properties of the frame about to be drawn: the
         // text area is sized by the window, and a shell the user typed `exit`
@@ -1324,7 +1388,19 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
             });
         }
 
+        if let Some(key) = app.take_conversation_request()
+            && let Some(adapter) = adapter_for(&adapters, key.provider)
+        {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = adapter.conversation(&key, CONVERSATION_TURNS).await;
+                let _ = tx.send(AppEvent::Conversed { key, result }).await;
+            });
+        }
+
         tokio::select! {
+            // Wakes the loop so a live session's transcript is re-read.
+            _ = tick.tick() => {}
             Some(ev) = in_rx.recv() => {
                 effects.extend(app.handle_event(ev));
                 while let Ok(ev) = in_rx.try_recv() {
