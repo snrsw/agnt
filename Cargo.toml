@@ -1,0 +1,30 @@
+[package]
+name = "agnt"
+version = "0.1.0"
+edition = "2024"
+description = "TUI for managing local Claude Code and Codex sessions"
+repository = "https://github.com/snrsw/agnt"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+directories = "6"
+fd-lock = "4"
+libc = "0.2"
+portable-pty = "0.9"
+# `unstable-rendered-line-info` is what exposes `Paragraph::line_count`, so
+# the prompt box can be sized by the same wrapper that draws it rather than by
+# a second, hand-rolled estimate of the same thing.
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
+tui-term = "0.3"
+vt100 = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+unicode-width = "0.2"
