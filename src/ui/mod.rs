@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use chrono::{DateTime, Utc};
 
-use crate::app::{App, Conversation, GroupHeader, InputMode, ListRow, Mode};
+use crate::app::{App, GroupHeader, InputMode, ListRow, Mode};
 use crate::transcript::Role;
 use std::collections::BTreeMap;
 
@@ -817,25 +817,10 @@ const PANEL_MIN_WIDTH: u16 = 130;
 
 /// The selected session's recent turns, newest at the bottom.
 fn draw_conversation(frame: &mut Frame, area: Rect, app: &App) {
-    let selected = app.selected.as_ref();
-    let conv = selected.and_then(|k| app.conversations.get(k));
-    let agent = selected.map_or("agent", |k| k.provider.label());
-
-    let summary = match conv {
-        Some(Conversation::Loaded(t)) => t.summary.clone(),
-        _ => None,
-    };
-    let title = match summary {
-        Some(s) => format!(
-            " conversation · {} ",
-            text::truncate_to_width(&s, area.width.saturating_sub(20) as usize)
-        ),
-        None => " conversation ".to_string(),
-    };
     let block = Block::default()
         .borders(Borders::LEFT)
         .border_style(theme::rule())
-        .title(Span::styled(title, theme::muted()));
+        .title(Span::styled(" conversation ", theme::muted()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let inner = Rect {
@@ -844,56 +829,32 @@ fn draw_conversation(frame: &mut Frame, area: Rect, app: &App) {
         ..inner
     };
 
-    let note =
-        |msg: &str| Paragraph::new(Span::styled(msg.to_string(), theme::muted())).wrap(Wrap { trim: true });
-    let turns = match conv {
-        None => return frame.render_widget(note("No session selected."), inner),
-        Some(Conversation::Loading) => return frame.render_widget(note("Reading transcript…"), inner),
-        Some(Conversation::Missing) => {
-            return frame.render_widget(note("No transcript file found for this session."), inner);
-        }
-        Some(Conversation::Failed(e)) => {
-            return frame.render_widget(note(&format!("Could not read it: {e}")), inner);
-        }
-        Some(Conversation::Loaded(t)) if t.turns.is_empty() => {
-            return frame.render_widget(note("The transcript has no messages yet."), inner);
-        }
-        Some(Conversation::Loaded(t)) => &t.turns,
+    let selected = app.selected.as_ref();
+    let turns = selected
+        .and_then(|k| app.conversations.get(k))
+        .filter(|t| !t.is_empty());
+    let Some(turns) = turns else {
+        let note = Paragraph::new(Span::styled("No conversation to show.", theme::muted()));
+        frame.render_widget(note, inner);
+        return;
     };
+    let agent = selected.map_or("agent", |k| k.provider.label());
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     for turn in turns {
-        match turn.role {
-            Role::Tool => {
-                lines.push(Line::from(Span::styled(
-                    format!("  → {}", turn.text),
-                    theme::muted(),
-                )));
-                continue;
-            }
-            Role::User => {
-                lines.push(Line::raw(""));
-                lines.push(Line::from(Span::styled(
-                    "you",
-                    theme::accent().add_modifier(Modifier::BOLD),
-                )));
-            }
-            Role::Assistant => {
-                lines.push(Line::raw(""));
-                lines.push(Line::from(Span::styled(
-                    agent,
-                    Style::default().add_modifier(Modifier::BOLD),
-                )));
-            }
-        }
+        let (who, style) = match turn.role {
+            Role::User => ("you", theme::accent().add_modifier(Modifier::BOLD)),
+            Role::Assistant => (agent, Style::default().add_modifier(Modifier::BOLD)),
+        };
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(who, style)));
         lines.extend(turn.text.lines().map(|l| Line::raw(l.to_string())));
     }
 
     // Pin the newest turn to the bottom: scroll past whatever does not fit.
     let para = Paragraph::new(lines).wrap(Wrap { trim: false });
     let total = u16::try_from(para.line_count(inner.width)).unwrap_or(u16::MAX);
-    let scroll = total.saturating_sub(inner.height);
-    frame.render_widget(para.scroll((scroll, 0)), inner);
+    frame.render_widget(para.scroll((total.saturating_sub(inner.height), 0)), inner);
 }
 
 /// One line of keys for what you are doing now, and nothing else unless
@@ -1664,43 +1625,27 @@ mod tests {
     /// list, newest turn at the bottom; a narrow one leaves the list alone.
     #[test]
     fn a_wide_terminal_shows_the_conversation_beside_the_list() {
-        use crate::transcript::{Transcript, Turn};
+        use crate::transcript::Turn;
         let dir = tempfile::tempdir().unwrap();
         let mut app = app_with(
             &dir,
             vec![session("a", "Fix the auth handler", RuntimeState::Running)],
         );
         let key = app.selected.clone().unwrap();
+        let reply = |text: String| Turn {
+            role: Role::Assistant,
+            text,
+        };
         let mut turns = vec![Turn {
             role: Role::User,
             text: "the oldest question".into(),
         }];
-        for i in 0..30 {
-            turns.push(Turn {
-                role: Role::Assistant,
-                text: format!("filler reply {i}"),
-            });
-        }
-        turns.push(Turn {
-            role: Role::Tool,
-            text: "Bash".into(),
-        });
-        turns.push(Turn {
-            role: Role::Assistant,
-            text: "Fixed it.".into(),
-        });
-        app.conversations.insert(
-            key,
-            Conversation::Loaded(Transcript {
-                turns,
-                summary: Some("auth fix".into()),
-            }),
-        );
+        turns.extend((0..30).map(|i| reply(format!("filler reply {i}"))));
+        turns.push(reply("Fixed it.".into()));
+        app.conversations.insert(key, turns);
 
         let out = render(&app, 140, 30);
-        assert!(has(&out, "conversation · auth fix"), "{out}");
         assert!(has(&out, "Fixed it."), "{out}");
-        assert!(has(&out, "→ Bash"), "{out}");
         assert!(
             !has(&out, "the oldest question"),
             "older turns scroll off the top\n{out}"

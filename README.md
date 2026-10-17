@@ -44,10 +44,6 @@ The prompt at the bottom is always live: type a task and press `Enter` to start 
 | `Ctrl+L` | Link a PR or issue URL |
 | `Ctrl+C` | Quit |
 
-### Conversation panel
-
-On a terminal at least 130 columns wide, the right side shows the selected session's recent conversation, newest turn at the bottom. It is read from the tools' own files (`~/.claude/projects/*/<id>.jsonl`, `~/.codex/sessions`); tool calls show as their name only. A live session's panel is re-read every 2 seconds.
-
 ### Shell mode
 
 `S-Tab` puts your login shell, running on a pseudo-terminal, in the prompt box. Completion, aliases, history, and full-screen programs all work. The directory the shell ends in is where the next session starts. `S-Tab` returns to the task prompt with your text intact.

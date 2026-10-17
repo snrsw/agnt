@@ -29,7 +29,7 @@ use super::{
 use crate::model::{
     Capabilities, Operation, Origin, Provider, Runtime, RuntimeState, Session, SessionKey, Support, text,
 };
-use crate::transcript::{self, Transcript};
+use crate::transcript::{self, Turn};
 
 pub const BINARY: &str = "codex";
 
@@ -383,21 +383,16 @@ impl Adapter for CodexAdapter {
     /// Codex only starts interactively, so the terminal is handed to it and
     /// the new conversation is picked up by the next discovery. No identity is
     /// invented in the meantime.
-    async fn conversation(
-        &self,
-        key: &SessionKey,
-        max_turns: usize,
-    ) -> Result<Option<Transcript>, AdapterError> {
+    async fn conversation(&self, key: &SessionKey, max_turns: usize) -> Result<Vec<Turn>, AdapterError> {
         let Some(home) = self.home.clone() else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
         let id = key.native_session_id.clone();
         let read = tokio::task::spawn_blocking(move || match rollout_for(&home, &id) {
-            Some(path) => transcript::read_file(&path, transcript::parse_codex).map(Some),
-            None => Ok(None),
+            Some(path) => transcript::read_tail(&path, transcript::parse_codex, max_turns),
+            None => Ok(Vec::new()),
         });
-        let t = read.await.map_err(std::io::Error::other)??;
-        Ok(t.map(|t| t.tail(max_turns)))
+        Ok(read.await.map_err(std::io::Error::other)??)
     }
 
     async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError> {
