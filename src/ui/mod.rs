@@ -889,7 +889,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "ctrl+r          refresh".into(),
                 "".into(),
                 "ctrl+x          hide the selected row, or restore it".into(),
-                "delete          delete the selected session for good (asks first)".into(),
+                "delete / bksp   on an empty prompt: delete the selected session for good (asks first)".into(),
                 "ctrl+g          change its classification".into(),
                 "ctrl+l          attach a PR or issue URL to it".into(),
                 "".into(),
