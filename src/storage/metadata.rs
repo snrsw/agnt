@@ -50,6 +50,11 @@ impl MetadataFile {
         }
     }
 
+    /// Drop everything agnt recorded about `key`.
+    pub fn remove(&mut self, key: &SessionKey) {
+        self.sessions.retain(|m| &m.key != key);
+    }
+
     pub fn by_key(&self) -> BTreeMap<SessionKey, SessionMeta> {
         self.sessions
             .iter()

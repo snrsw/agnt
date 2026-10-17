@@ -255,6 +255,7 @@ impl Adapter for ClaudeAdapter {
                 attach: Support::Supported,
                 resume: Support::Supported,
                 stop: Support::Supported,
+                delete: Support::Supported,
             },
         }
     }
@@ -363,6 +364,16 @@ impl Adapter for ClaudeAdapter {
         let job_id = self.job_id_for(key, Operation::Stop).await?;
         run(bin, &["stop", &job_id], None, STOP_TIMEOUT).await?;
         Ok(StopResult::Confirmed)
+    }
+
+    /// `claude rm` also removes the session's worktree, and refuses when that
+    /// would lose unpushed commits. agnt never passes the flags that override
+    /// the refusal; Claude's message is shown instead.
+    async fn delete(&self, key: &SessionKey) -> Result<(), AdapterError> {
+        let bin = self.bin(Operation::Delete)?;
+        let job_id = self.job_id_for(key, Operation::Delete).await?;
+        run(bin, &["rm", &job_id], None, STOP_TIMEOUT).await?;
+        Ok(())
     }
 }
 

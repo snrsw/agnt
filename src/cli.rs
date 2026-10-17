@@ -63,6 +63,13 @@ pub enum Command {
     Restore { id: String },
     /// Stop a running session
     Stop { id: String },
+    /// Permanently delete a session through the provider's CLI
+    Delete {
+        id: String,
+        /// Do not ask for confirmation
+        #[arg(long)]
+        yes: bool,
+    },
     /// Attach a PR or issue URL to a session
     Link { id: String, url: String },
     /// Show supported features, versions, and data locations
@@ -118,6 +125,29 @@ async fn run_command(paths: Paths, cmd: Command) -> anyhow::Result<ExitCode> {
                 }
                 Ok(providers::StopResult::Requested { note }) => {
                     println!("stop requested (not yet confirmed): {key}: {note}");
+                    Ok(ExitCode::SUCCESS)
+                }
+                Err(e) => unsupported_or_fail(e),
+            }
+        }
+        Command::Delete { id, yes } => {
+            let key = resolve(&paths, &id)?;
+            if !yes {
+                eprint!(
+                    "Permanently delete {key}? This cannot be undone. Enter to delete, anything else to cancel: "
+                );
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !answer.trim().is_empty() {
+                    println!("cancelled");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            let adapter = providers::for_provider(key.provider);
+            match adapter.delete(&key).await {
+                Ok(()) => {
+                    MetadataStore::new(&paths).update(|m| m.remove(&key))?;
+                    println!("deleted: {key}");
                     Ok(ExitCode::SUCCESS)
                 }
                 Err(e) => unsupported_or_fail(e),

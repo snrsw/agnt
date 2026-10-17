@@ -889,6 +889,7 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
                 "ctrl+r          refresh".into(),
                 "".into(),
                 "ctrl+x          hide the selected row, or restore it".into(),
+                "delete          delete the selected session for good (asks first)".into(),
                 "ctrl+g          change its classification".into(),
                 "ctrl+l          attach a PR or issue URL to it".into(),
                 "".into(),
@@ -920,8 +921,16 @@ fn draw_dialog(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 lines.push("y / Enter: hide   Esc: back".into());
             }
-            ("Delete (hide)", lines)
+            ("Hide", lines)
         }
+        Mode::DeleteDialog { key } => (
+            "Delete",
+            vec![
+                format!("target: {}", key.qualified()),
+                "Permanently deletes the session through the tool's own CLI. This cannot be undone.".into(),
+                "Enter: delete   Esc: back".into(),
+            ],
+        ),
         Mode::ChooseAction { key } => (
             "Choose an operation",
             vec![
@@ -1591,7 +1600,7 @@ mod tests {
             live: true,
         };
         let out = render(&app, 100, 24);
-        assert!(has(&out, "Delete (hide)"), "{out}");
+        assert!(has(&out, "Hide"), "{out}");
         assert!(has(&out, "History stays in the tool"), "{out}");
         assert!(has(&out, "stop first, then hide"), "{out}");
     }

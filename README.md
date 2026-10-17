@@ -39,6 +39,7 @@ The prompt at the bottom is always live: type a task and press `Enter` to start 
 | `Ctrl+Y` | Show hidden rows |
 | `Ctrl+R` | Refresh |
 | `Ctrl+X` | Hide or restore the selected row |
+| `Delete` | Delete the selected session for good (Enter confirms) |
 | `Ctrl+G` | Change its classification |
 | `Ctrl+L` | Link a PR or issue URL |
 | `Ctrl+C` | Quit |
@@ -61,8 +62,8 @@ Stopped sessions and saved history are folded away by default (`Ctrl+O` shows th
 
 | Area | State |
 | --- | --- |
-| Claude | Discover, observe, start, attach, resume, stop |
-| Codex | Discover, start, resume; attach, observe, and stop need the Codex App Server |
+| Claude | Discover, observe, start, attach, resume, stop, delete |
+| Codex | Discover, start, resume, delete; attach, observe, and stop need the Codex App Server |
 | GitHub | `gh` detection only |
 
 Claude support uses the official CLI (`claude agents --json`, `claude attach`, `--resume`, `--bg`). Codex has no scriptable listing, so agnt reads `~/.codex/sessions` read-only; Codex rows show state Unknown. `agnt doctor` lists each unsupported operation and the reason.
@@ -80,4 +81,4 @@ Files live in the OS data directory for `agnt`, or in `AGNT_DATA_DIR`.
 | `metadata.lock` | Lock held during updates |
 | `sessions-cache.json` | List snapshot; safe to delete |
 
-agnt never copies conversation text. `hide` removes a row from the list without deleting anything.
+agnt never copies conversation text. `hide` removes a row from the list without deleting anything. `delete` (or `agnt delete <id>`) permanently deletes the session through `claude rm` or `codex delete`; a running session must be stopped first.

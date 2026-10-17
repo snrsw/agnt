@@ -50,6 +50,10 @@ pub enum AppEvent {
         then_hide: bool,
         result: Result<StopResult, AdapterError>,
     },
+    Deleted {
+        key: SessionKey,
+        result: Result<(), AdapterError>,
+    },
     /// The embedded shell wrote to its screen. Carries nothing: the screen
     /// itself lives behind the shell's own lock, and this only says "redraw".
     ShellDrew,
@@ -81,6 +85,10 @@ pub enum Mode {
     HideDialog {
         key: SessionKey,
         live: bool,
+    },
+    /// Delete on a row: permanent, so it asks first.
+    DeleteDialog {
+        key: SessionKey,
     },
     /// Enter on a row whose state does not decide attach vs. resume.
     ChooseAction {
@@ -132,6 +140,7 @@ pub enum Effect {
         key: SessionKey,
         then_hide: bool,
     },
+    Delete(SessionKey),
     Start {
         provider: Provider,
         request: StartRequest,
@@ -509,6 +518,21 @@ impl App {
         Ok(())
     }
 
+    /// The provider deleted the session: forget it, and what agnt kept about it.
+    pub fn apply_deleted(&mut self, key: SessionKey, result: Result<(), AdapterError>) {
+        match result {
+            Ok(()) => {
+                self.sessions.remove(&key);
+                self.metas.remove(&key);
+                if let Err(e) = self.store.update(|file| file.remove(&key)) {
+                    self.mode = Mode::Message(format!("deleted, but its metadata stayed: {e}"));
+                }
+            }
+            Err(e) => self.mode = Mode::Message(format!("cannot delete: {e}")),
+        }
+        self.ensure_selection();
+    }
+
     pub fn cycle_workflow(&mut self, key: &SessionKey) -> Result<(), String> {
         self.edit_meta(key, |m| m.workflow = m.workflow.next())?;
         self.ensure_selection();
@@ -876,6 +900,13 @@ impl App {
                 }
                 _ => Vec::new(),
             },
+            Mode::DeleteDialog { key: target } => {
+                self.mode = Mode::Normal;
+                match key.code {
+                    KeyCode::Enter => vec![Effect::Delete(target)],
+                    _ => Vec::new(),
+                }
+            }
             Mode::ChooseAction { key: target } => match key.code {
                 KeyCode::Char('a') => {
                     self.mode = Mode::Normal;
@@ -994,6 +1025,16 @@ impl App {
             KeyCode::Char('y') if ctrl => {
                 self.show_hidden = !self.show_hidden;
                 self.ensure_selection();
+            }
+            KeyCode::Delete => {
+                if let Some(v) = self.selected_view() {
+                    let k = v.session.key.clone();
+                    self.mode = if v.state().is_live() {
+                        Mode::Message("It is running. Stop it first (ctrl+x, then s), then delete.".into())
+                    } else {
+                        Mode::DeleteDialog { key: k }
+                    };
+                }
             }
             KeyCode::Char('x') if ctrl => {
                 if let Some(v) = self.selected_view() {
@@ -1119,6 +1160,7 @@ impl App {
                 then_hide,
                 result,
             } => self.apply_stopped(key, then_hide, result),
+            AppEvent::Deleted { key, result } => self.apply_deleted(key, result),
             // The shell drew; the next frame picks the screen up.
             AppEvent::ShellDrew => {}
         }
@@ -1331,6 +1373,16 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                                 result,
                             })
                             .await;
+                    });
+                }
+                Effect::Delete(key) => {
+                    let Some(adapter) = adapter_for(&adapters, key.provider) else {
+                        continue;
+                    };
+                    let tx = ev_tx.clone();
+                    tokio::spawn(async move {
+                        let result = adapter.delete(&key).await;
+                        let _ = tx.send(AppEvent::Deleted { key, result }).await;
                     });
                 }
                 Effect::RunPlan(plan) => {
@@ -1571,6 +1623,64 @@ mod tests {
             [Effect::Stop { then_hide: true, .. }]
         ));
         assert!(!app.selected_view().unwrap().is_hidden());
+    }
+
+    #[test]
+    fn delete_asks_and_enter_confirms() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Codex, "a", RuntimeState::Stopped)]);
+        app.show_history = true;
+        app.ensure_selection();
+        let k = SessionKey::new(Provider::Codex, "a");
+
+        // Esc, or any other key, backs out.
+        app.handle_key(code(KeyCode::Delete));
+        assert_eq!(app.mode, Mode::DeleteDialog { key: k.clone() });
+        assert!(app.handle_key(code(KeyCode::Esc)).is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+
+        app.handle_key(code(KeyCode::Delete));
+        assert_eq!(app.handle_key(code(KeyCode::Enter)), vec![Effect::Delete(k)]);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn a_running_session_is_not_offered_for_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(discovery(
+                vec![session(Provider::Claude, "a", RuntimeState::Running)],
+                true,
+            )),
+        );
+        app.handle_key(code(KeyCode::Delete));
+        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("Stop it first")));
+        assert!(app.handle_key(code(KeyCode::Enter)).is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_delete_forgets_the_row_and_its_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![session(Provider::Codex, "a", RuntimeState::Stopped)]);
+        let k = SessionKey::new(Provider::Codex, "a");
+        app.add_link(&k, "https://github.com/o/r/pull/1").unwrap();
+
+        app.apply_deleted(
+            k.clone(),
+            Err(AdapterError::CliFailed {
+                command: "codex delete".into(),
+                status: "1".into(),
+                stderr: "nope".into(),
+            }),
+        );
+        assert!(app.sessions.contains_key(&k));
+        assert!(matches!(app.mode, Mode::Message(ref m) if m.contains("nope")));
+
+        app.apply_deleted(k.clone(), Ok(()));
+        assert!(!app.sessions.contains_key(&k));
+        assert!(app.store.load().unwrap().get(&k).is_none());
     }
 
     #[test]
