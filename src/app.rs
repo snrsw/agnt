@@ -20,7 +20,7 @@ use crate::providers::{
     Adapter, AdapterError, AttachPlan, Discovery, RuntimeUpdate, StartOutcome, StartRequest, StopResult,
 };
 use crate::shell::{self, PtyShell};
-use crate::storage::{CacheStore, MetadataStore, Paths};
+use crate::storage::{self, CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
 use crate::ui;
 
@@ -524,8 +524,12 @@ impl App {
             Ok(()) => {
                 self.sessions.remove(&key);
                 self.metas.remove(&key);
-                if let Err(e) = self.store.update(|file| file.remove(&key)) {
-                    self.mode = Mode::Message(format!("deleted, but its metadata stayed: {e}"));
+                let forgot = match &self.metadata_error {
+                    Some(err) => Err(format!("cannot edit metadata: {err}")),
+                    None => storage::forget(&self.store, &self.cache, &key).map_err(|e| e.to_string()),
+                };
+                if let Err(e) = forgot {
+                    self.mode = Mode::Message(format!("deleted, but agnt's record of it stayed: {e}"));
                 }
             }
             Err(e) => self.mode = Mode::Message(format!("cannot delete: {e}")),
@@ -1204,6 +1208,25 @@ fn adapter_for(adapters: &[Arc<dyn Adapter>], provider: Provider) -> Option<Arc<
     adapters.iter().find(|a| a.provider() == provider).cloned()
 }
 
+/// Run one adapter call off the UI thread and send back the event it makes.
+fn spawn_adapter_call<Fut>(
+    adapters: &[Arc<dyn Adapter>],
+    provider: Provider,
+    tx: &mpsc::Sender<AppEvent>,
+    call: impl FnOnce(Arc<dyn Adapter>) -> Fut,
+) where
+    Fut: std::future::Future<Output = AppEvent> + Send + 'static,
+{
+    let Some(adapter) = adapter_for(adapters, provider) else {
+        return;
+    };
+    let tx = tx.clone();
+    let event = call(adapter);
+    tokio::spawn(async move {
+        let _ = tx.send(event.await).await;
+    });
+}
+
 fn spawn_refresh(app: &mut App, adapters: &[Arc<dyn Adapter>], tx: mpsc::Sender<AppEvent>) {
     if app.refreshing {
         return;
@@ -1360,29 +1383,19 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                     }
                 }
                 Effect::Stop { key, then_hide } => {
-                    let Some(adapter) = adapter_for(&adapters, key.provider) else {
-                        continue;
-                    };
-                    let tx = ev_tx.clone();
-                    tokio::spawn(async move {
-                        let result = adapter.stop(&key).await;
-                        let _ = tx
-                            .send(AppEvent::Stopped {
-                                key,
-                                then_hide,
-                                result,
-                            })
-                            .await;
+                    spawn_adapter_call(&adapters, key.provider, &ev_tx, |a| async move {
+                        let result = a.stop(&key).await;
+                        AppEvent::Stopped {
+                            key,
+                            then_hide,
+                            result,
+                        }
                     });
                 }
                 Effect::Delete(key) => {
-                    let Some(adapter) = adapter_for(&adapters, key.provider) else {
-                        continue;
-                    };
-                    let tx = ev_tx.clone();
-                    tokio::spawn(async move {
-                        let result = adapter.delete(&key).await;
-                        let _ = tx.send(AppEvent::Deleted { key, result }).await;
+                    spawn_adapter_call(&adapters, key.provider, &ev_tx, |a| async move {
+                        let result = a.delete(&key).await;
+                        AppEvent::Deleted { key, result }
                     });
                 }
                 Effect::RunPlan(plan) => {
@@ -1681,6 +1694,7 @@ mod tests {
         app.apply_deleted(k.clone(), Ok(()));
         assert!(!app.sessions.contains_key(&k));
         assert!(app.store.load().unwrap().get(&k).is_none());
+        assert!(app.cache.load().unwrap().sessions.iter().all(|s| s.key != k));
     }
 
     #[test]

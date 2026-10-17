@@ -37,6 +37,7 @@ pub const APP_SERVER_REASON: &str =
     "needs the Codex App Server protocol; record V4/V6 in docs/p0-validation.md first";
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How far back the history reader looks.
 ///
@@ -411,7 +412,7 @@ impl Adapter for CodexAdapter {
             bin,
             &["delete", "--force", &key.native_session_id],
             None,
-            READ_TIMEOUT,
+            DELETE_TIMEOUT,
         )
         .await?;
         Ok(())

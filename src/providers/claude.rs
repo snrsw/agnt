@@ -44,6 +44,7 @@ pub const PREVIEW_REASON: &str =
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// One element of `claude agents --json`. Unknown fields are ignored so a
@@ -183,11 +184,14 @@ impl ClaudeAdapter {
     /// than derived from the UUID, so a change in how Claude shortens IDs
     /// cannot send an operation to the wrong session.
     async fn job_id_for(&self, key: &SessionKey, operation: Operation) -> Result<String, AdapterError> {
+        Ok(self.entry_for(key, operation).await?.id)
+    }
+
+    async fn entry_for(&self, key: &SessionKey, operation: Operation) -> Result<AgentEntry, AdapterError> {
         let entries = self.list(true).await?;
         entries
             .into_iter()
             .find(|e| e.native_id() == key.native_session_id)
-            .map(|e| e.id)
             .ok_or(AdapterError::Unsupported {
                 provider: Provider::Claude,
                 operation,
@@ -371,8 +375,15 @@ impl Adapter for ClaudeAdapter {
     /// the refusal; Claude's message is shown instead.
     async fn delete(&self, key: &SessionKey) -> Result<(), AdapterError> {
         let bin = self.bin(Operation::Delete)?;
-        let job_id = self.job_id_for(key, Operation::Delete).await?;
-        run(bin, &["rm", &job_id], None, STOP_TIMEOUT).await?;
+        let entry = self.entry_for(key, Operation::Delete).await?;
+        if entry.runtime_state(false).is_live() {
+            return Err(AdapterError::Unsupported {
+                provider: Provider::Claude,
+                operation: Operation::Delete,
+                reason: "it is running; stop it first".into(),
+            });
+        }
+        run(bin, &["rm", &entry.id], None, DELETE_TIMEOUT).await?;
         Ok(())
     }
 }
@@ -482,6 +493,35 @@ mod tests {
         let active = entries(SAMPLE);
         let sessions = merge_listings(&active, &active);
         assert_eq!(sessions.len(), 3);
+    }
+
+    /// A fake `claude` that lists `SAMPLE` and records what `rm` was given.
+    fn fake_claude(dir: &Path) -> (ClaudeAdapter, PathBuf) {
+        let log = dir.join("rm-args");
+        let bin = dir.join("claude");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = agents ]; then cat <<'EOF'\n{SAMPLE}\nEOF\nelse echo \"$@\" > {}; fi\n",
+            log.display()
+        );
+        std::fs::write(&bin, script).unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        (ClaudeAdapter { binary: Some(bin) }, log)
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_running_session_and_removes_a_finished_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, log) = fake_claude(dir.path());
+
+        let blocked = SessionKey::new(Provider::Claude, "5175105c-ec25-4624-a2f9-9addbe8d6ec3");
+        assert!(a.delete(&blocked).await.unwrap_err().is_unsupported());
+        assert!(!log.exists());
+
+        let done = SessionKey::new(Provider::Claude, "450b4952-286f-4761-a89b-33d40a4fad2e");
+        a.delete(&done).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().trim(), "rm 450b4952");
     }
 
     #[tokio::test]

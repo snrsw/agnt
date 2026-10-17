@@ -81,4 +81,4 @@ Files live in the OS data directory for `agnt`, or in `AGNT_DATA_DIR`.
 | `metadata.lock` | Lock held during updates |
 | `sessions-cache.json` | List snapshot; safe to delete |
 
-agnt never copies conversation text. `hide` removes a row from the list without deleting anything. `delete` (or `agnt delete <id>`) permanently deletes the session through `claude rm` or `codex delete`; a running session must be stopped first.
+agnt never copies conversation text. `hide` removes a row from the list without deleting anything. `delete` removes the session for good, through the provider's own CLI.

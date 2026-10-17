@@ -146,7 +146,7 @@ async fn run_command(paths: Paths, cmd: Command) -> anyhow::Result<ExitCode> {
             let adapter = providers::for_provider(key.provider);
             match adapter.delete(&key).await {
                 Ok(()) => {
-                    MetadataStore::new(&paths).update(|m| m.remove(&key))?;
+                    crate::storage::forget(&MetadataStore::new(&paths), &CacheStore::new(&paths), &key)?;
                     println!("deleted: {key}");
                     Ok(ExitCode::SUCCESS)
                 }
