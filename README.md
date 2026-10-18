@@ -68,7 +68,7 @@ Stopped sessions and saved history are folded away by default (`Ctrl+O` shows th
 
 Claude support uses the official CLI (`claude agents --json`, `claude attach`, `--resume`, `--bg`). Codex has no scriptable listing, so agnt reads `~/.codex/sessions` read-only; Codex rows show state Unknown. `agnt doctor` lists each unsupported operation and the reason.
 
-Architecture decisions are in [docs/adr/0001-architecture.md](docs/adr/0001-architecture.md).
+Architecture decisions are in [docs/adr/0001-architecture.md](docs/adr/0001-architecture.md). The concepts behind agnt (sessions, the two kinds of state, providers, hide versus delete) are explained in [docs/concepts](docs/concepts/index.md), an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) bundle.
 
 ## Data
 
