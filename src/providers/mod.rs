@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::model::{Capabilities, Operation, Provider, Runtime, RuntimeHandle, Session, SessionKey};
+use crate::transcript::Turn;
 
 /// One page of discovered sessions plus what the page covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +133,10 @@ pub trait Adapter: Send + Sync {
 
     /// Short content, capped at `max_chars`. `Ok(None)` when nothing is available.
     async fn preview(&self, key: &SessionKey, max_chars: usize) -> Result<Option<String>, AdapterError>;
+
+    /// The last `max_turns` turns, read from the tool's own transcript file.
+    /// Empty when no file is found.
+    async fn conversation(&self, key: &SessionKey, max_turns: usize) -> Result<Vec<Turn>, AdapterError>;
 
     async fn start(&self, req: StartRequest) -> Result<StartOutcome, AdapterError>;
 

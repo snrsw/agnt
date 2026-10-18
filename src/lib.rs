@@ -8,6 +8,7 @@
 //! - `providers::{claude,codex}`: discovery, launch, attach, observation
 //! - `shell`: the one-line shell behind the prompt's shell mode
 //! - `terminal`: terminal ownership hand-off and restoration
+//! - `transcript`: conversation turns read from the tools' own files
 //! - `storage`: metadata, cache, locking, schema
 //! - `git` / `github`: cwd git info and link enrichment
 
@@ -20,4 +21,5 @@ pub mod providers;
 pub mod shell;
 pub mod storage;
 pub mod terminal;
+pub mod transcript;
 pub mod ui;

@@ -22,6 +22,7 @@ use crate::providers::{
 use crate::shell::{self, PtyShell};
 use crate::storage::{self, CacheStore, MetadataStore, Paths};
 use crate::terminal::{self, InputGate, TerminalGuard};
+use crate::transcript::Turn;
 use crate::ui;
 
 /// Results of background work, delivered to the event loop.
@@ -39,6 +40,10 @@ pub enum AppEvent {
     Previewed {
         key: SessionKey,
         result: Result<Option<String>, AdapterError>,
+    },
+    Conversed {
+        key: SessionKey,
+        result: Result<Vec<Turn>, AdapterError>,
     },
     Started {
         provider: Provider,
@@ -58,6 +63,9 @@ pub enum AppEvent {
     /// itself lives behind the shell's own lock, and this only says "redraw".
     ShellDrew,
 }
+
+/// How many turns the conversation panel keeps; more than fit on screen.
+const CONVERSATION_TURNS: usize = 40;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderStatus {
@@ -216,6 +224,11 @@ pub struct App {
     /// Keys a preview has already been requested for, so a slow or empty
     /// answer is not asked for again on every redraw.
     preview_requested: BTreeSet<SessionKey>,
+    /// Recent turns for the conversation panel, by session.
+    pub conversations: BTreeMap<SessionKey, Vec<Turn>>,
+    /// The session whose turns were last asked for, so each selection reads
+    /// its transcript once.
+    conversation_asked: Option<SessionKey>,
     /// The new-session prompt, always live. Typing goes here in task mode.
     pub draft: NewSession,
     /// Whether the text area is taking a task or a `cd`.
@@ -268,6 +281,8 @@ impl App {
             cache_saved_at,
             should_quit: false,
             preview_requested: BTreeSet::new(),
+            conversations: BTreeMap::new(),
+            conversation_asked: None,
             draft: NewSession::new(Provider::Claude),
             input_mode: InputMode::default(),
             shell_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -797,6 +812,16 @@ impl App {
         Some(key)
     }
 
+    /// The selected session's key, once each time the selection changes to it.
+    pub fn take_conversation_request(&mut self) -> Option<SessionKey> {
+        let key = self.selected.clone()?;
+        if self.conversation_asked.as_ref() == Some(&key) {
+            return None;
+        }
+        self.conversation_asked = Some(key.clone());
+        Some(key)
+    }
+
     pub fn save_cache(&self) -> Result<(), crate::storage::StorageError> {
         let rows: Vec<Session> = self.sessions.values().cloned().collect();
         self.cache.save(&rows)
@@ -1155,6 +1180,10 @@ impl App {
                     s.preview = Some(text);
                 }
             }
+            AppEvent::Conversed { key, result } => {
+                // A failed read leaves the panel empty, as for a missing file.
+                self.conversations.insert(key, result.unwrap_or_default());
+            }
             AppEvent::Started {
                 provider,
                 cwd,
@@ -1321,6 +1350,16 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
             tokio::spawn(async move {
                 let result = adapter.preview(&key, SessionView::EXCERPT_CHARS * 4).await;
                 let _ = tx.send(AppEvent::Previewed { key, result }).await;
+            });
+        }
+
+        if let Some(key) = app.take_conversation_request()
+            && let Some(adapter) = adapter_for(&adapters, key.provider)
+        {
+            let tx = ev_tx.clone();
+            tokio::spawn(async move {
+                let result = adapter.conversation(&key, CONVERSATION_TURNS).await;
+                let _ = tx.send(AppEvent::Conversed { key, result }).await;
             });
         }
 

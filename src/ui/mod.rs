@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use chrono::{DateTime, Utc};
 
 use crate::app::{App, GroupHeader, InputMode, ListRow, Mode};
+use crate::transcript::Role;
 use std::collections::BTreeMap;
 
 use crate::model::{RuntimeState, SessionView, TitleSource, View, WorkflowState, text};
@@ -157,7 +158,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(area);
 
     draw_header(frame, header, app);
-    draw_table(frame, body, app);
+    if body.width >= PANEL_MIN_WIDTH {
+        let [list, panel] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).areas(body);
+        draw_table(frame, list, app);
+        draw_conversation(frame, panel, app);
+    } else {
+        draw_table(frame, body, app);
+    }
     if shell_open {
         draw_shell(frame, compose, app, shell_rows.unwrap_or(0));
     } else if let Some(prompt) = prompt {
@@ -800,6 +808,53 @@ fn draw_table(frame: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(selected_index);
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// The narrowest terminal that gets the conversation panel. Below this the
+/// list keeps the whole width, since a card squeezed under ~70 columns loses
+/// its detail line before the panel would show anything useful.
+const PANEL_MIN_WIDTH: u16 = 130;
+
+/// The selected session's recent turns, newest at the bottom.
+fn draw_conversation(frame: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(theme::rule())
+        .title(Span::styled(" conversation ", theme::muted()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(1),
+        ..inner
+    };
+
+    let selected = app.selected.as_ref();
+    let turns = selected
+        .and_then(|k| app.conversations.get(k))
+        .filter(|t| !t.is_empty());
+    let Some(turns) = turns else {
+        let note = Paragraph::new(Span::styled("No conversation to show.", theme::muted()));
+        frame.render_widget(note, inner);
+        return;
+    };
+    let agent = selected.map_or("agent", |k| k.provider.label());
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for turn in turns {
+        let (who, style) = match turn.role {
+            Role::User => ("you", theme::accent().add_modifier(Modifier::BOLD)),
+            Role::Assistant => (agent, Style::default().add_modifier(Modifier::BOLD)),
+        };
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(who, style)));
+        lines.extend(turn.text.lines().map(|l| Line::raw(l.to_string())));
+    }
+
+    // Pin the newest turn to the bottom: scroll past whatever does not fit.
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = u16::try_from(para.line_count(inner.width)).unwrap_or(u16::MAX);
+    frame.render_widget(para.scroll((total.saturating_sub(inner.height), 0)), inner);
 }
 
 /// One line of keys for what you are doing now, and nothing else unless
@@ -1564,6 +1619,41 @@ mod tests {
         assert!(narrow_line.contains('\u{2026}'), "{narrow_line}");
         // The tail is kept: it is what says which checkout this is.
         assert!(narrow_line.contains("a-long-repository-name"), "{narrow_line}");
+    }
+
+    /// A wide terminal puts the selected session's conversation beside the
+    /// list, newest turn at the bottom; a narrow one leaves the list alone.
+    #[test]
+    fn a_wide_terminal_shows_the_conversation_beside_the_list() {
+        use crate::transcript::Turn;
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(
+            &dir,
+            vec![session("a", "Fix the auth handler", RuntimeState::Running)],
+        );
+        let key = app.selected.clone().unwrap();
+        let reply = |text: String| Turn {
+            role: Role::Assistant,
+            text,
+        };
+        let mut turns = vec![Turn {
+            role: Role::User,
+            text: "the oldest question".into(),
+        }];
+        turns.extend((0..30).map(|i| reply(format!("filler reply {i}"))));
+        turns.push(reply("Fixed it.".into()));
+        app.conversations.insert(key, turns);
+
+        let out = render(&app, 140, 30);
+        assert!(has(&out, "Fixed it."), "{out}");
+        assert!(
+            !has(&out, "the oldest question"),
+            "older turns scroll off the top\n{out}"
+        );
+        assert!(has(&out, "Fix the auth handler"), "{out}");
+
+        let narrow = render(&app, 120, 30);
+        assert!(!has(&narrow, "Fixed it."), "{narrow}");
     }
 
     #[test]
