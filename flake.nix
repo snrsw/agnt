@@ -49,6 +49,32 @@
           );
       };
 
+      packages = forEachSupportedSystem (
+        { pkgs }:
+        {
+          default = pkgs.rustPlatform.buildRustPackage {
+            pname = "agnt";
+            version = (pkgs.lib.importTOML ./Cargo.toml).package.version;
+            src = pkgs.lib.cleanSource ./.;
+            cargoLock.lockFile = ./Cargo.lock;
+
+            # These drive a real shell on a PTY and watch it `cd`, which the
+            # Nix build sandbox does not allow; the rest of the suite still runs.
+            checkFlags = [
+              "--skip=app::tests::exiting_the_shell_gives_the_text_area_back"
+              "--skip=app::tests::keys_reach_the_embedded_shell_and_the_directory_follows_it"
+              "--skip=shell::tests::a_real_shell_runs_on_the_pty_and_reports_its_directory"
+            ];
+
+            meta = {
+              description = "TUI for managing local Claude Code and Codex sessions";
+              homepage = "https://github.com/snrsw/agnt";
+              mainProgram = "agnt";
+            };
+          };
+        }
+      );
+
       devShells = forEachSupportedSystem (
         { pkgs }:
         {
