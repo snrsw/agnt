@@ -1,0 +1,41 @@
+name: flakehub
+
+# Publishes the flake at a release tag to FlakeHub, so consumers can follow
+# the newest release with `https://flakehub.com/f/<org>/<repo>/*`.
+# tagpr.yml calls this after it creates a tag: tags pushed with GITHUB_TOKEN
+# do not trigger `on: push: tags`. Run it by hand to publish an older tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish
+        type: string
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - id: rev
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - uses: DeterminateSystems/flakehub-push@v7
+        with:
+          visibility: public
+          tag: ${{ inputs.tag }}
+          rev: ${{ steps.rev.outputs.sha }}
