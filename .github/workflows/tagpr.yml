@@ -20,3 +20,13 @@ jobs:
       - uses: actions/checkout@v6
       - id: run-tagpr
         uses: Songmu/tagpr@v1
+
+  flakehub:
+    needs: tagpr
+    if: needs.tagpr.outputs.tagpr-tag != ''
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/flakehub.yml
+    with:
+      tag: ${{ needs.tagpr.outputs.tagpr-tag }}
