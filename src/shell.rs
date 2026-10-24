@@ -827,7 +827,11 @@ mod tests {
             }
         }
 
-        shell.send(b"printf '\\033[0c'\r");
+        // The `sleep` keeps a command running while the reply arrives, so the
+        // tty driver echoes all of it. Without it the reply can land after the
+        // shell is back at its prompt: on macOS `/bin/sh` is bash, whose
+        // readline takes `ESC [ ?` as a key sequence and leaves only `1;2c`.
+        shell.send(b"printf '\\033[0c'; sleep 1\r");
         let mut answered = false;
         for _ in 0..100 {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
