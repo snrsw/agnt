@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.3](https://github.com/snrsw/agnt/compare/0.0.2...0.0.3) - 2026-10-28
+
+### Other Changes
+- 🐛 Drop x86_64-darwin so the FlakeHub publish succeeds by @snrsw in https://github.com/snrsw/agnt/pull/12
+
 ## [0.0.2](https://github.com/snrsw/agnt/compare/0.0.1...0.0.2) - 2026-10-24
 
 ### Other Changes
