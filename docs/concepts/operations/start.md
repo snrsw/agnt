@@ -11,6 +11,9 @@ sources:
   - id: readme
     resource: https://github.com/snrsw/agnt/blob/main/README.md
     title: README
+  - id: app
+    resource: https://github.com/snrsw/agnt/blob/main/src/app.rs
+    title: src/app.rs
 ---
 
 # Gesture
@@ -27,6 +30,14 @@ The two providers start work differently, and agnt does not hide the difference.
 | [Codex](/providers/codex.md) | Hands the terminal to `codex` with the task | Codex's own screen; the new session is discovered on return |
 
 A session started by agnt has [origin](/model/origin.md) `managed`.
+
+# Confirming a background start
+
+A Claude Code row starts in [runtime state](/model/runtime-state.md) `Starting`, which only says agnt asked for the session. agnt refreshes immediately after the start and again every 2 seconds while any row is still `Starting`. The provider's state replaces `Starting` as soon as the session is listed.[^app]
+
+A refresh that was already running when the session started used a listing taken before the session existed. That result does not remove the row, and another refresh runs when it finishes.[^app]
+
+[^app]: src/app.rs
 
 [^providers-mod]: src/providers/mod.rs
 [^readme]: README
