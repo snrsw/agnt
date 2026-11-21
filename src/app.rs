@@ -219,6 +219,13 @@ pub struct App {
     pub selected: Option<SessionKey>,
     pub mode: Mode,
     pub refreshing: bool,
+    /// When the refresh in flight asked for its listings. A row created after
+    /// that, such as one just started, cannot be in its answer, so a missing
+    /// row is not evidence that it is gone.
+    refresh_started_at: Option<DateTime<Utc>>,
+    /// A refresh was asked for while one was in flight. Its answer may predate
+    /// whatever prompted the ask, so another runs when it finishes.
+    refresh_queued: bool,
     pub cache_saved_at: Option<DateTime<Utc>>,
     pub should_quit: bool,
     /// Keys a preview has already been requested for, so a slow or empty
@@ -278,6 +285,8 @@ impl App {
             selected: None,
             mode: Mode::Normal,
             refreshing: false,
+            refresh_started_at: None,
+            refresh_queued: false,
             cache_saved_at,
             should_quit: false,
             preview_requested: BTreeSet::new(),
@@ -583,6 +592,11 @@ impl App {
                     .cloned()
                     .collect();
                 for k in missing {
+                    // Created after this listing was asked for, so its absence
+                    // says nothing. The next refresh decides.
+                    if self.is_newer_than_refresh(&k) {
+                        continue;
+                    }
                     if d.complete {
                         self.sessions.remove(&k);
                     } else if let Some(s) = self.sessions.get_mut(&k) {
@@ -614,6 +628,16 @@ impl App {
             }
         }
         self.ensure_selection();
+    }
+
+    fn is_newer_than_refresh(&self, key: &SessionKey) -> bool {
+        match (
+            self.refresh_started_at,
+            self.sessions.get(key).and_then(|s| s.runtime.observed_at),
+        ) {
+            (Some(asked), Some(observed)) => observed > asked,
+            _ => false,
+        }
     }
 
     /// Apply state updates, ignoring any older than the current observation.
@@ -698,6 +722,27 @@ impl App {
             }
         }
         self.ensure_selection();
+    }
+
+    /// Claim the refresh slot. Returns false when a refresh is already in
+    /// flight, in which case another is queued to run after it, so a request
+    /// made mid-refresh is answered by a listing taken after the request.
+    pub fn begin_refresh(&mut self) -> bool {
+        if self.refreshing {
+            self.refresh_queued = true;
+            return false;
+        }
+        self.refreshing = true;
+        self.refresh_started_at = Some(Utc::now());
+        true
+    }
+
+    /// Whether a session agnt started has not been confirmed by its provider
+    /// yet. While one has not, the list keeps asking.
+    pub fn has_starting(&self) -> bool {
+        self.sessions
+            .values()
+            .any(|s| s.runtime.state == RuntimeState::Starting)
     }
 
     /// The directory the next session starts in.
@@ -1159,7 +1204,20 @@ impl App {
             self.mode = Mode::Normal;
             return vec![Effect::RunPlan(Box::new(plan))];
         }
+        // A background start only says the session was asked for; its state
+        // comes from the provider, so ask straight away.
+        let started = matches!(
+            event,
+            AppEvent::Started {
+                result: Ok(StartOutcome::Started(_)),
+                ..
+            }
+        );
+        let done = matches!(event, AppEvent::RefreshDone);
         self.handle_app_event(event);
+        if started || (done && std::mem::take(&mut self.refresh_queued)) {
+            return vec![Effect::Refresh];
+        }
         Vec::new()
     }
 
@@ -1170,7 +1228,10 @@ impl App {
                 let _ = self.save_cache();
             }
             AppEvent::Observed { provider, result } => self.apply_updates(provider, result),
-            AppEvent::RefreshDone => self.refreshing = false,
+            AppEvent::RefreshDone => {
+                self.refreshing = false;
+                self.refresh_started_at = None;
+            }
             AppEvent::Previewed { key, result } => {
                 // A failed or unsupported preview leaves the row alone; the
                 // detail pane keeps saying the content was not fetched.
@@ -1258,10 +1319,9 @@ fn spawn_adapter_call<Fut>(
 }
 
 fn spawn_refresh(app: &mut App, adapters: &[Arc<dyn Adapter>], tx: mpsc::Sender<AppEvent>) {
-    if app.refreshing {
+    if !app.begin_refresh() {
         return;
     }
-    app.refreshing = true;
     let keys_by_provider: BTreeMap<Provider, Vec<SessionKey>> =
         app.sessions.keys().fold(BTreeMap::new(), |mut m, k| {
             m.entry(k.provider).or_default().push(k.clone());
@@ -1312,6 +1372,9 @@ fn start_shell(
     Ok(())
 }
 
+/// How often the list asks again while a session it started is unconfirmed.
+const STARTING_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run the interactive list until the user quits.
 pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::Result<()> {
     let mut app = App::load(&paths);
@@ -1330,6 +1393,11 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
     // where the user is reading the list instead of to where they are waiting
     // for a prompt. Nothing blocks on it: the reader thread does the waiting.
     start_shell(&mut app, &mut guard, &ev_tx)?;
+
+    // A started session can take a moment to show up in its provider's
+    // listing; until it does, keep asking rather than leave it at Starting.
+    let mut starting_poll = tokio::time::interval(STARTING_POLL);
+    starting_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut effects: Vec<Effect> = Vec::new();
     loop {
@@ -1375,6 +1443,9 @@ pub async fn run_tui(paths: Paths, adapters: Vec<Arc<dyn Adapter>>) -> anyhow::R
                 while let Ok(ev) = ev_rx.try_recv() {
                     effects.extend(app.absorb(ev));
                 }
+            }
+            _ = starting_poll.tick(), if app.has_starting() && !app.refreshing => {
+                effects.push(Effect::Refresh);
             }
             else => break,
         }
@@ -2478,9 +2549,68 @@ mod tests {
                 handle: None,
             })),
         });
-        assert!(effects.is_empty());
+        assert!(matches!(effects.as_slice(), [Effect::Refresh]));
         assert_eq!(app.session_count(), 1);
         assert_eq!(app.selected.as_ref(), Some(&key));
+        assert!(app.has_starting());
+    }
+
+    fn start(app: &mut App, id: &str) -> SessionKey {
+        let key = SessionKey::new(Provider::Claude, id);
+        app.apply_started(
+            Provider::Claude,
+            "/tmp".into(),
+            Ok(StartOutcome::Started(crate::providers::StartResult {
+                key: key.clone(),
+                handle: None,
+            })),
+        );
+        key
+    }
+
+    /// The listing that confirms a started session replaces Starting with
+    /// the provider's state, and the list stops polling.
+    #[test]
+    fn discovery_replaces_starting_with_the_provider_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        let key = start(&mut app, "new-1");
+        assert!(app.begin_refresh());
+        app.apply_discovery(
+            Provider::Claude,
+            Ok(discovery(
+                vec![session(Provider::Claude, "new-1", RuntimeState::Running)],
+                true,
+            )),
+        );
+        assert_eq!(app.sessions[&key].runtime.state, RuntimeState::Running);
+        assert!(!app.has_starting());
+    }
+
+    /// A refresh already in flight when the session started answers with a
+    /// listing taken before it existed. That must neither drop the row nor
+    /// be the last word: another refresh follows.
+    #[test]
+    fn a_refresh_older_than_the_start_keeps_the_row_and_runs_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with(&dir, vec![]);
+        assert!(app.begin_refresh());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let key = start(&mut app, "new-1");
+        // The refresh the start asks for is queued behind the one in flight.
+        assert!(!app.begin_refresh());
+        app.apply_discovery(Provider::Claude, Ok(discovery(vec![], true)));
+        assert_eq!(app.sessions[&key].runtime.state, RuntimeState::Starting);
+        assert!(matches!(
+            app.absorb(AppEvent::RefreshDone).as_slice(),
+            [Effect::Refresh]
+        ));
+        // A refresh asked for after the start is evidence: a complete listing
+        // without the row means it is gone.
+        assert!(app.begin_refresh());
+        app.apply_discovery(Provider::Claude, Ok(discovery(vec![], true)));
+        assert!(!app.sessions.contains_key(&key));
+        assert!(app.absorb(AppEvent::RefreshDone).is_empty());
     }
 
     #[test]
