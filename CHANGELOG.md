@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.0.4](https://github.com/snrsw/agnt/compare/0.0.3...0.0.4) - 2026-11-21
+
+### Other Changes
+- 🐛 Fetch the state of a session right after starting it by @snrsw in https://github.com/snrsw/agnt/pull/14
+
 ## [0.0.3](https://github.com/snrsw/agnt/compare/0.0.2...0.0.3) - 2026-10-28
 
 ### Other Changes
